@@ -53,11 +53,12 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const text = evt.delta.text || '';
           if (text) cache.updatePartialInCache(tabId, text);
         }
-        // Early detection: create plan_review card for background tab (Plan mode only)
+        // Early detection: create plan_review card for background tab (Plan mode only).
+        // Bypass auto-approves via Rust backend — no UI card needed.
         if (evt.type === 'content_block_start'
             && evt.content_block?.type === 'tool_use'
             && evt.content_block?.name === 'ExitPlanMode'
-            && ['plan', 'bypass'].includes(useSettingsStore.getState().sessionMode)) {
+            && useSettingsStore.getState().sessionMode === 'plan') {
           const bgSnapshot = cache.sessionCache.get(tabId);
           const bgExisting = bgSnapshot?.messages.find((m) => m.id === 'plan_review_current');
           if (!bgExisting || !bgExisting.resolved) {
@@ -173,8 +174,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 content: '', toolName: block.name,
                 toolInput: block.input, timestamp: Date.now(),
               });
-              // Only create plan_review card in Plan or Bypass mode
-              if (['plan', 'bypass'].includes(useSettingsStore.getState().sessionMode)) {
+              // Only create plan_review card in Plan mode.
+              // Bypass auto-approves via Rust backend — no UI card needed.
+              if (useSettingsStore.getState().sessionMode === 'plan') {
                 const bgSnapshot = cache.sessionCache.get(tabId);
                 let bgPlanContent = '';
                 if (bgSnapshot) {
@@ -319,14 +321,32 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         }
         break;
       }
-      case 'process_exit':
+      case 'process_exit': {
+        // P0-5: Clean up Tauri event listeners for background tab.
+        // __claudeUnlisteners is keyed by stdinId (desk_xxx), NOT tabId (session uuid).
+        // Use msg.__stdinId (tagged by the listener closure) to find the correct entry.
+        const bgStdinId = msg.__stdinId;
+        if (bgStdinId && (window as any).__claudeUnlisteners?.[bgStdinId]) {
+          (window as any).__claudeUnlisteners[bgStdinId]();
+          delete (window as any).__claudeUnlisteners[bgStdinId];
+        }
         cache.setStatusInCache(tabId, 'idle');
         cache.setMetaInCache(tabId, { stdinId: undefined });
         useSessionStore.getState().fetchSessions();
         break;
+      }
       case 'system':
         if (msg.subtype === 'init') {
           cache.setMetaInCache(tabId, { model: msg.model });
+        } else if (msg.subtype === 'error') {
+          // FI-3: Surface system errors in background tabs too
+          cache.addMessageToCache(tabId, {
+            id: generateMessageId(),
+            role: 'system',
+            type: 'text',
+            content: msg.message || msg.error || 'System error',
+            timestamp: Date.now(),
+          });
         }
         break;
     }
@@ -338,11 +358,32 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
   const handleStreamMessage = useCallback((msg: any) => {
     if (!msg || !msg.type) return;
 
+    try { // P1-4: error boundary — prevent uncaught exceptions from crashing the stream pipeline
+
+    // Diagnostic: log unrecognized message types that would be silently dropped
+    const KNOWN_TYPES = new Set([
+      'tokenicode_permission_request', 'stream_event', 'system', 'assistant',
+      'user', 'human', 'tool_result', 'tool_use_summary', 'result', 'process_exit',
+      'content_block_delta',
+    ]);
+    if (!KNOWN_TYPES.has(msg.type)) {
+      console.warn('[TOKENICODE:stream] unhandled message type:', msg.type, msg);
+    }
+
     // --- SDK Permission Request (routed through stream channel for reliability) ---
     if (msg.type === 'tokenicode_permission_request') {
 
-      // ExitPlanMode: attach to PlanReviewCard instead of creating PermissionCard
+      // ExitPlanMode: only show PlanReviewCard in Plan mode.
+      // In other modes, auto-approve so the CLI continues without blocking.
       if (msg.tool_name === 'ExitPlanMode') {
+        if (useSettingsStore.getState().sessionMode !== 'plan') {
+          // Auto-approve: CLI doesn't need user confirmation outside Plan mode
+          const stdinId = useChatStore.getState().sessionMeta.stdinId;
+          if (stdinId) {
+            bridge.respondPermission(stdinId, msg.request_id, true, undefined, msg.tool_use_id, msg.input);
+          }
+          return;
+        }
         const { messages, updateMessage, addMessage, setActivityStatus } = useChatStore.getState();
         const permData = {
           requestId: msg.request_id,
@@ -375,6 +416,55 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           });
           setActivityStatus({ phase: 'awaiting' });
         }
+        return;
+      }
+
+      // AskUserQuestion: create QuestionCard instead of PermissionCard.
+      // User answers are sent back via respondPermission(updatedInput) — NOT sendStdin.
+      if (msg.tool_name === 'AskUserQuestion') {
+        const { messages, addMessage, updateMessage, setActivityStatus } = useChatStore.getState();
+        const questionId = msg.tool_use_id || 'ask_question_current';
+        // Search by exact ID first, then fall back to any unresolved AskUserQuestion.
+        // This handles the race condition where the assistant message arrives first
+        // with block.id (e.g. "toolu_01abc") and the control_request arrives later
+        // with a different or missing tool_use_id.
+        const existing = messages.find((m) => m.id === questionId && m.type === 'question')
+          || messages.find((m) => m.type === 'question' && !m.resolved && m.toolName === 'AskUserQuestion');
+        if (existing) {
+          // Patch permissionData so QuestionCard uses respondPermission (SDK path)
+          // instead of sendStdin (legacy path). Always update — even if permissionData
+          // exists — because a new control_request supersedes a stale one.
+          updateMessage(existing.id, {
+            permissionData: {
+              requestId: msg.request_id,
+              toolName: msg.tool_name,
+              input: msg.input,
+              toolUseId: msg.tool_use_id,
+            },
+            toolInput: msg.input,
+          });
+          return;
+        }
+        const questions = msg.input?.questions;
+        addMessage({
+          id: questionId,
+          role: 'assistant',
+          type: 'question',
+          content: '',
+          toolName: 'AskUserQuestion',
+          toolInput: msg.input,
+          questions: Array.isArray(questions) ? questions : [],
+          resolved: false,
+          timestamp: Date.now(),
+          // Attach permission data so QuestionCard uses respondPermission instead of sendStdin
+          permissionData: {
+            requestId: msg.request_id,
+            toolName: msg.tool_name,
+            input: msg.input,
+            toolUseId: msg.tool_use_id,
+          },
+        });
+        setActivityStatus({ phase: 'awaiting' });
         return;
       }
 
@@ -420,6 +510,10 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
 
     // If stream belongs to a background tab, route key events to cache and return
     if (isBackground) {
+      // Diagnostic: log background routing for non-trivial message types
+      if (msg.type !== 'stream_event') {
+        console.log('[TOKENICODE:route] background:', msg.type, 'owner:', ownerTabId, 'active:', activeTabId);
+      }
       handleBackgroundStreamMessage(msg, ownerTabId);
       return;
     }
@@ -509,11 +603,12 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           });
         }
         // Early detection: create plan_review card ONLY in explicit Plan mode.
-        // In Code/Bypass modes the CLI handles ExitPlanMode natively — no UI card needed.
+        // In Code mode the CLI handles ExitPlanMode natively.
+        // In Bypass mode the Rust backend auto-approves — no UI card needed.
         if (evt.type === 'content_block_start'
             && evt.content_block?.type === 'tool_use'
             && evt.content_block?.name === 'ExitPlanMode'
-            && ['plan', 'bypass'].includes(useSettingsStore.getState().sessionMode)) {
+            && useSettingsStore.getState().sessionMode === 'plan') {
           const currentMessages = useChatStore.getState().messages;
 
           // Guard: if plan_review_current already exists and was resolved,
@@ -567,6 +662,18 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
       case 'system':
         if (msg.subtype === 'init') {
           setSessionMeta({ model: msg.model });
+        } else if (msg.subtype === 'error') {
+          // FI-3: Surface system-level errors instead of silently dropping them
+          addMessage({
+            id: generateMessageId(),
+            role: 'system',
+            type: 'text',
+            content: msg.message || msg.error || 'System error',
+            timestamp: Date.now(),
+          });
+        } else {
+          // FI-3: Log unknown subtypes so we know what we're missing
+          console.warn('[TOKENICODE] Unhandled system subtype:', msg.subtype, msg);
         }
         break;
 
@@ -653,10 +760,15 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
               // instead of creating duplicate question cards (TK-103).
               const questionId = block.id || 'ask_question_current';
 
-              // Guard: skip if question already exists (resolved or not)
+              // Guard: skip if question already exists (resolved or not).
+              // Search by exact ID first, then by any AskUserQuestion card —
+              // the control_request handler may have already created one with
+              // a different ID (e.g. 'ask_question_current' vs 'toolu_01abc').
               const currentMessages = useChatStore.getState().messages;
               const existingQuestion = currentMessages.find(
                 (m) => m.id === questionId && m.type === 'question',
+              ) || currentMessages.find(
+                (m) => m.type === 'question' && !m.resolved && m.toolName === 'AskUserQuestion',
               );
               if (existingQuestion) {
                 // Already exists — just ensure awaiting state if unresolved
@@ -706,9 +818,10 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 timestamp: Date.now(),
               });
 
-              // Only create plan_review card in Plan or Bypass mode.
+              // Only create plan_review card in Plan mode.
               // In Code mode the CLI handles ExitPlanMode natively.
-              if (['plan', 'bypass'].includes(useSettingsStore.getState().sessionMode)) {
+              // In Bypass mode the Rust backend auto-approves — no UI card needed.
+              if (useSettingsStore.getState().sessionMode === 'plan') {
                 const currentMessages = useChatStore.getState().messages;
 
                 // Guard: skip if already approved (replay)
@@ -761,7 +874,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             useChatStore.setState({ partialThinking: '' });
             agentActions.updatePhase(agentId, 'thinking');
             addMessage({
-              id: generateMessageId(),
+              id: msg.uuid ? `${msg.uuid}_thinking_${blockIdx}` : generateMessageId(),
               role: 'assistant',
               type: 'thinking',
               content: block.thinking || '',
@@ -962,6 +1075,8 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
 
             // Re-send: spawn a fresh process without resume_session_id
             (async () => {
+              // P0-5: Declare retryId outside try so catch can clean up listeners on failure
+              const retryId = `desk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
               try {
                 const cwd = useSettingsStore.getState().workingDirectory;
                 if (!cwd) return;
@@ -977,8 +1092,6 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                   description: retryText.slice(0, 100),
                   phase: 'spawning', startTime: Date.now(), isMain: true,
                 });
-
-                const retryId = `desk_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
                 const retryUnlisten = await onClaudeStream(retryId, (m: any) => {
                   m.__stdinId = retryId;
                   handleStreamMessage(m);
@@ -995,7 +1108,6 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                   cwd,
                   model: resolveModelForProvider(selectedModel),
                   session_id: retryId,
-                  dangerously_skip_permissions: sessionMode === 'bypass',
                   // No resume_session_id — fresh start to avoid thinking signature issue
                   thinking_level: useSettingsStore.getState().thinkingLevel,
                   session_mode: (sessionMode === 'ask' || sessionMode === 'plan') ? sessionMode : undefined,
@@ -1009,6 +1121,11 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 bridge.trackSession(session.session_id).catch(() => {});
               } catch (retryErr) {
                 console.error('[TOKENICODE] Provider-switch auto-retry failed:', retryErr);
+                // P0-5: Clean up the retry listeners on failure
+                if ((window as any).__claudeUnlisteners?.[retryId]) {
+                  (window as any).__claudeUnlisteners[retryId]();
+                  delete (window as any).__claudeUnlisteners[retryId];
+                }
                 setSessionStatus('error');
                 addMessage({
                   id: generateMessageId(),
@@ -1185,8 +1302,9 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         if (resultInputTokens > 160_000 && !autoCompactFiredRef.current && compactStdinId && msg.subtype === 'success') {
           autoCompactFiredRef.current = true;
           console.log('[TOKENICODE] Auto-compact triggered: inputTokens =', resultInputTokens);
+          const compactMsgId = generateMessageId();
           addMessage({
-            id: generateMessageId(),
+            id: compactMsgId,
             role: 'system',
             type: 'text',
             content: '',
@@ -1196,11 +1314,31 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             commandCompleted: false,
             timestamp: Date.now(),
           });
+          // FI-4: Register pendingCommandMsgId so result handler can mark it completed
+          setSessionMeta({ pendingCommandMsgId: compactMsgId });
           setSessionStatus('running');
           setActivityStatus({ phase: 'thinking' });
           bridge.sendStdin(compactStdinId, '/compact').catch((err) => {
             console.error('[TOKENICODE] Auto-compact failed:', err);
           });
+          // FI-4: Timeout fallback — if compact doesn't complete within 90s, auto-complete
+          setTimeout(() => {
+            const meta = useChatStore.getState().sessionMeta;
+            if (meta.pendingCommandMsgId === compactMsgId) {
+              useChatStore.getState().updateMessage(compactMsgId, {
+                commandCompleted: true,
+                commandData: {
+                  ...useChatStore.getState().messages.find((m) => m.id === compactMsgId)?.commandData,
+                  output: 'Compact timed out',
+                  completedAt: Date.now(),
+                },
+              });
+              useChatStore.getState().setSessionMeta({ pendingCommandMsgId: undefined });
+              if (useChatStore.getState().sessionStatus === 'running') {
+                useChatStore.getState().setSessionStatus('idle');
+              }
+            }
+          }, 90_000);
           break; // Skip pending message flush — compact takes priority
         }
 
@@ -1262,6 +1400,16 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           }
         }
 
+        // P0-5: Clean up Tauri event listeners for this session to prevent leaks
+        const exitingStdinId = msg.__stdinId || useChatStore.getState().sessionMeta.stdinId;
+        if (exitingStdinId && (window as any).__claudeUnlisteners?.[exitingStdinId]) {
+          (window as any).__claudeUnlisteners[exitingStdinId]();
+          delete (window as any).__claudeUnlisteners[exitingStdinId];
+        }
+        if ((window as any).__claudeUnlisten) {
+          (window as any).__claudeUnlisten = null;
+        }
+
         setSessionStatus('idle');
         setSessionMeta({ stdinId: undefined });
         useChatStore.getState().clearPendingMessages();
@@ -1280,6 +1428,19 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           }
         }
         break;
+    }
+
+    } catch (err) {
+      // P1-4: catch-all for unexpected errors in stream message processing
+      console.error('[TOKENICODE] handleStreamMessage error:', err, 'msg:', msg?.type, msg?.subtype);
+      const { addMessage } = useChatStore.getState();
+      addMessage({
+        id: generateMessageId(),
+        role: 'system',
+        type: 'text',
+        content: `Internal error processing stream message: ${err}`,
+        timestamp: Date.now(),
+      });
     }
   }, [handleBackgroundStreamMessage, exitPlanModeSeenRef, autoCompactFiredRef, silentRestartRef, handleSubmitRef, handleStderrLineRef, setInputSync]);
 

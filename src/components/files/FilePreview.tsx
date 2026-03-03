@@ -77,7 +77,9 @@ function injectBaseTag(html: string, filePath: string): string {
   // Get directory of the file (handle both / and \ separators)
   const lastSep = Math.max(filePath.lastIndexOf('/'), filePath.lastIndexOf('\\'));
   const dir = lastSep >= 0 ? filePath.substring(0, lastSep + 1) : '';
-  const baseTag = `<base href="file://${dir}">`;
+  // Escape HTML special chars to prevent attribute injection (P0-7 fix)
+  const safeDir = dir.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const baseTag = `<base href="file://${safeDir}">`;
 
   // Insert into <head> if present, otherwise prepend
   if (/<head[\s>]/i.test(html)) {

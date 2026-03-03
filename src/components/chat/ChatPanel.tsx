@@ -18,6 +18,7 @@ import { envFingerprint, resolveModelForProvider } from '../../lib/api-provider'
 import { useProviderStore } from '../../stores/providerStore';
 import { MarkdownRenderer } from '../shared/MarkdownRenderer';
 import { SetupWizard } from '../setup/SetupWizard';
+import { AiAvatar } from '../shared/AiAvatar';
 
 /** Shared plan panel toggle — used by ChatPanel (panel) and InputBar (button) */
 export const usePlanPanelStore = create<{
@@ -602,8 +603,11 @@ export function ChatPanel() {
               // Hide streaming text while an unresolved question is pending —
               // the CLI may keep sending text_delta events for the next turn's
               // content, but the user needs to answer the question first.
+              // Check both resolved flag AND interactionState to handle edge
+              // cases where setInteractionState hasn't propagated yet.
               const hasPendingQuestion = messages.some(
-                (m) => m.type === 'question' && !m.resolved,
+                (m) => m.type === 'question' && !m.resolved
+                  && m.interactionState !== 'resolved' && m.interactionState !== 'sending',
               );
               if (hasPendingQuestion) return null;
 
@@ -711,8 +715,21 @@ async function startDraftSession(folderPath: string) {
       // Tag message with stdinId so the handler can route to correct session
       msg.__stdinId = preWarmId;
       // Forward to InputBar's handler via a global — will be overridden when InputBar mounts
-      if ((window as any).__claudeStreamHandler) {
-        (window as any).__claudeStreamHandler(msg);
+      const handler = (window as any).__claudeStreamHandler;
+      if (handler) {
+        // Replay any events that arrived while handler was briefly null (React effect cycle)
+        const queue: any[] = (window as any).__claudeStreamQueue;
+        if (queue && queue.length > 0) {
+          console.warn(`[TOKENICODE] replaying ${queue.length} queued pre-warm events`);
+          const pending = queue.splice(0);
+          for (const queued of pending) handler(queued);
+        }
+        handler(msg);
+      } else {
+        // Handler not yet available (InputBar not mounted or React effect cycle) — queue the event
+        if (!(window as any).__claudeStreamQueue) (window as any).__claudeStreamQueue = [];
+        (window as any).__claudeStreamQueue.push(msg);
+        console.warn('[TOKENICODE] pre-warm event queued (handler not ready):', msg.type);
       }
     });
     const unlistenStderr = await onClaudeStderr(preWarmId, (line: string) => {
@@ -736,7 +753,6 @@ async function startDraftSession(folderPath: string) {
       cwd: folderPath,
       model: resolveModelForProvider(useSettingsStore.getState().selectedModel),
       session_id: preWarmId,
-      dangerously_skip_permissions: useSettingsStore.getState().sessionMode === 'bypass',
       thinking_level: useSettingsStore.getState().thinkingLevel,
       provider_id: useProviderStore.getState().activeProviderId || undefined,
       permission_mode: mapSessionModeToPermissionMode(useSettingsStore.getState().sessionMode),
@@ -786,15 +802,8 @@ function WelcomeScreen() {
 
   return (
     <div className="flex flex-col items-center justify-center h-full text-center">
-      {/* App icon — inverts between light/dark, slash follows accent */}
-      <div className="w-20 h-20 rounded-3xl bg-black dark:bg-white
-        flex items-center justify-center mb-6 shadow-glow">
-        <svg width="80" height="80" viewBox="0 0 171 171" fill="none">
-          <path d="M66.79 58.73L40.33 85.19L66.79 111.66L57.53 120.92L21.8 85.19L57.53 49.47Z" className="fill-white dark:fill-black" />
-          <path d="M111.5 49.47L147.22 85.19L111.5 120.92L102.24 111.66L128.7 85.19L102.24 58.73Z" className="fill-white dark:fill-black" />
-          <path d="M90.01 39.92L102.01 39.92L79.24 129.92L67.24 129.92L79.24 81.92Z" fill="var(--color-icon-slash)" />
-        </svg>
-      </div>
+      {/* App icon — customizable AI avatar */}
+      <AiAvatar size="w-20 h-20" rounded="rounded-3xl" className="mb-6 shadow-glow" />
       <h2 className="text-xl font-semibold text-accent mb-2">
         {t('chat.welcome')}
       </h2>
@@ -856,15 +865,8 @@ function EmptyReadyState() {
   const workingDirectory = useSettingsStore((s) => s.workingDirectory);
   return (
     <div className="flex flex-col items-center justify-center h-full text-center">
-      {/* App icon — inverts between light/dark, slash follows accent */}
-      <div className="w-16 h-16 rounded-2xl bg-black dark:bg-white
-        flex items-center justify-center mb-5 shadow-glow">
-        <svg width="64" height="64" viewBox="0 0 171 171" fill="none">
-          <path d="M66.79 58.73L40.33 85.19L66.79 111.66L57.53 120.92L21.8 85.19L57.53 49.47Z" className="fill-white dark:fill-black" />
-          <path d="M111.5 49.47L147.22 85.19L111.5 120.92L102.24 111.66L128.7 85.19L102.24 58.73Z" className="fill-white dark:fill-black" />
-          <path d="M90.01 39.92L102.01 39.92L79.24 129.92L67.24 129.92L79.24 81.92Z" fill="var(--color-icon-slash)" />
-        </svg>
-      </div>
+      {/* App icon — customizable AI avatar */}
+      <AiAvatar size="w-16 h-16" rounded="rounded-2xl" className="mb-5 shadow-glow" />
       <h2 className="text-lg font-semibold text-accent mb-1">
         {t('chat.welcome')}
       </h2>

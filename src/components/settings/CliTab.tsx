@@ -109,8 +109,8 @@ export function CliTab() {
       {/* Status + path display */}
       {(status === 'found' || status === 'idle') && cliPath && (
         <div className="py-1 space-y-1">
-          <span className="text-[13px] text-green-500 font-medium">
-            ✓ {t('cli.installed')}
+          <span className={`text-[13px] font-medium ${gitBashMissing ? 'text-amber-500' : 'text-green-500'}`}>
+            {gitBashMissing ? '⚠' : '✓'} {t('cli.installed')}
           </span>
           <p className="text-xs text-text-tertiary truncate" title={cliPath}>
             {cliPath}
@@ -152,7 +152,7 @@ export function CliTab() {
               handleInstall();
             }}
             className={`flex-1 py-2 text-[13px] font-medium rounded-lg transition-smooth
-              ${status === 'not_found'
+              ${(status === 'not_found' || gitBashMissing)
                 ? 'bg-accent text-text-inverse hover:bg-accent-hover'
                 : 'border border-border-subtle text-text-muted hover:bg-bg-secondary hover:text-text-primary'
               }`}

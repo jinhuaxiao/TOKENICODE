@@ -61,6 +61,8 @@ interface SettingsState {
   updateDownloaded: boolean;
   /** Last app version the user has seen the changelog for */
   lastSeenVersion: string;
+  /** Custom AI avatar image (data URL or empty string for default </> icon) */
+  aiAvatarUrl: string;
 
   toggleTheme: () => void;
   setTheme: (theme: Theme) => void;
@@ -88,6 +90,7 @@ interface SettingsState {
   setUpdateAvailable: (available: boolean, version?: string) => void;
   setUpdateDownloaded: (downloaded: boolean) => void;
   setLastSeenVersion: (version: string) => void;
+  setAiAvatarUrl: (url: string) => void;
 }
 
 // --- Theme cycle order ---
@@ -124,6 +127,7 @@ export const useSettingsStore = create<SettingsState>()(
       updateVersion: '',
       updateDownloaded: false,
       lastSeenVersion: '',
+      aiAvatarUrl: '',
 
       toggleTheme: () =>
         set((state) => ({ theme: nextTheme(state.theme) })),
@@ -204,6 +208,9 @@ export const useSettingsStore = create<SettingsState>()(
 
       setLastSeenVersion: (version) =>
         set(() => ({ lastSeenVersion: version })),
+
+      setAiAvatarUrl: (url) =>
+        set(() => ({ aiAvatarUrl: url })),
     }),
     {
       name: 'tokenicode-settings',
@@ -258,6 +265,7 @@ export const useSettingsStore = create<SettingsState>()(
         updateAvailable: state.updateAvailable,
         updateVersion: state.updateVersion,
         lastSeenVersion: state.lastSeenVersion,
+        aiAvatarUrl: state.aiAvatarUrl,
       }),
     },
   ),

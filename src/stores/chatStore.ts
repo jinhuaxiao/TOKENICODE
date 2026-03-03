@@ -403,6 +403,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   saveToCache: (tabId) => {
     const { messages, isStreaming, partialText, partialThinking, sessionStatus, sessionMeta, activityStatus, inputDraft, pendingAttachments, pendingUserMessages, sessionCache } = get();
     const next = new Map(sessionCache);
+    // P1-5: Delete and re-insert to maintain LRU order (most recently used at end)
+    next.delete(tabId);
     next.set(tabId, {
       messages: [...messages],
       isStreaming,
@@ -415,12 +417,27 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       pendingAttachments: [...pendingAttachments],
       pendingUserMessages: [...pendingUserMessages],
     });
+    // P1-5: LRU eviction — keep at most 20 cached sessions
+    const MAX_CACHE = 20;
+    if (next.size > MAX_CACHE) {
+      const keysIter = next.keys();
+      while (next.size > MAX_CACHE) {
+        const oldest = keysIter.next().value;
+        if (oldest !== undefined) next.delete(oldest);
+        else break;
+      }
+    }
     set({ sessionCache: next });
   },
 
   restoreFromCache: (tabId) => {
-    const snapshot = get().sessionCache.get(tabId);
+    const cache = get().sessionCache;
+    const snapshot = cache.get(tabId);
     if (!snapshot) return false;
+    // P1-5: Refresh LRU position on access (delete + re-insert moves to end)
+    const next = new Map(cache);
+    next.delete(tabId);
+    next.set(tabId, snapshot);
     set({
       messages: [...snapshot.messages],
       isStreaming: snapshot.isStreaming,
@@ -432,7 +449,10 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       inputDraft: snapshot.inputDraft || '',
       pendingAttachments: snapshot.pendingAttachments ? [...snapshot.pendingAttachments] : [],
       pendingUserMessages: snapshot.pendingUserMessages ? [...snapshot.pendingUserMessages] : [],
+      sessionCache: next,
     });
+    // Sync running state to sessionStore for sidebar indicator (FI-1 fix)
+    useSessionStore.getState().setSessionRunning(tabId, snapshot.sessionStatus === 'running');
     return true;
   },
 

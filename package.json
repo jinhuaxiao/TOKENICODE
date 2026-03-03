@@ -1,7 +1,7 @@
 {
   "name": "tokenicode",
   "private": true,
-  "version": "0.8.0",
+  "version": "0.8.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -44,6 +44,7 @@
     "react-markdown": "^10.1.0",
     "rehype-highlight": "^7.0.2",
     "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
     "remark-gfm": "^4.0.1",
     "zustand": "^5.0.11"
   },

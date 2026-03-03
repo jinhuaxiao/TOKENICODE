@@ -13,6 +13,36 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.8.1',
+    date: '2026-03-02',
+    highlights: {
+      zh: [
+        'AI 头像自定义 — 设置里可以换 AI 聊天头像了，支持裁剪和缩放',
+        '安全加固 — 修复路径穿越、权限默认值、进程清理、XSS 等 8 项安全问题',
+        '稳定性提升 — 流消息错误兜底、事件监听器泄漏清理、缓存 LRU 淘汰',
+        '自动压缩不再卡死 — /compact 处理卡片现在能正确完成，超时也有兜底',
+        '系统消息不再丢失 — CLI 发的错误通知现在会显示在聊天里',
+        'CLI 检测更可靠 — 统一验证可执行文件有效性，设置页面状态与安装向导对齐',
+        '文件路径识别更精准 — 不再把 API 路径等普通文字错认成文件链接',
+        '长时间思考不再卡住 — 修复了 AI 深度思考时消息重复堆积、文字回复被淹没的问题',
+        '无限制模式不再卡死 — 修复了无限制模式下 AI 偶尔发消息后没有回复的问题',
+        '首句回复更快 — 跳过不必要的 MCP 服务器加载，冷启动速度大幅提升',
+      ],
+      en: [
+        'Custom AI avatar — Set a custom chat avatar in Settings with crop & zoom support',
+        'Security hardening — Fixed 8 security issues: path traversal, permission defaults, XSS, and more',
+        'Stability improvements — Stream error boundary, event listener leak cleanup, cache LRU eviction',
+        'Auto-compact no longer gets stuck — /compact processing card now completes properly with timeout fallback',
+        'System messages no longer silently dropped — CLI error notifications now appear in chat',
+        'More reliable CLI detection — Validates executable integrity across all discovery paths',
+        'Smarter file path detection — API endpoints and other non-file text no longer turn into clickable chips',
+        'Extended thinking no longer gets stuck — Fixed duplicate thinking messages that buried text responses during long reasoning sessions',
+        'Bypass mode no longer hangs — Fixed intermittent "thinking forever" bug where the CLI would freeze waiting for a response that never came',
+        'Faster first response — Skip unnecessary MCP server loading for significantly faster cold start',
+      ],
+    },
+  },
+  {
     version: '0.8.0',
     date: '2026-03-01',
     highlights: {

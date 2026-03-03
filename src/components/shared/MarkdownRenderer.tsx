@@ -3,6 +3,7 @@ import Markdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
 import rehypeHighlight from 'rehype-highlight';
+import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { useLightboxStore } from './ImageLightbox';
 import { useSettingsStore } from '../../stores/settingsStore';
@@ -122,6 +123,18 @@ function extractText(node: ReactNode): string {
   return '';
 }
 
+/** Known code/config file extensions — shared between wrapBareFilePaths and inline code detection. */
+const KNOWN_FILE_EXTENSIONS = new Set([
+  'md', 'mdx', 'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'json', 'jsonl',
+  'toml', 'yaml', 'yml', 'py', 'pyi', 'rs', 'go', 'html', 'htm', 'css',
+  'scss', 'sass', 'less', 'vue', 'svelte', 'sh', 'bash', 'zsh', 'fish',
+  'env', 'conf', 'cfg', 'ini', 'xml', 'sql', 'graphql', 'gql', 'proto',
+  'lock', 'log', 'txt', 'csv', 'rb', 'php', 'java', 'kt', 'swift', 'c',
+  'cpp', 'h', 'hpp', 'cs', 'r', 'lua', 'zig', 'ex', 'exs', 'erl', 'ml',
+  'mli', 'tf', 'hcl', 'dockerfile', 'makefile', 'png', 'jpg', 'jpeg',
+  'gif', 'svg', 'webp', 'ico', 'wasm', 'map',
+]);
+
 /** Detect file paths in inline code — conservative regex to avoid false positives.
  *  Matches: path-prefixed files (/foo.ts, ./bar.md, src/baz.rs) AND
  *  bare filenames with known code/config extensions (CLAUDE.md, package.json). */
@@ -155,6 +168,9 @@ function wrapBareFilePaths(content: string): string {
         // Don't wrap if preceded by ]( (markdown link)
         const before = str.slice(Math.max(0, pathStart - 2), pathStart);
         if (before.endsWith('](')) return match;
+        // TK-323: Only wrap if extension is a known code/config file type
+        const ext = path.split('.').pop()?.toLowerCase();
+        if (!ext || !KNOWN_FILE_EXTENSIONS.has(ext)) return match;
         return `${prefix}\`${path}\``;
       });
     }).join('');
@@ -171,9 +187,19 @@ interface Props {
   basePath?: string;
 }
 
+// Sanitize schema: GitHub defaults + className on all elements (needed for highlight.js)
+const SANITIZE_SCHEMA = {
+  ...defaultSchema,
+  attributes: {
+    ...defaultSchema.attributes,
+    '*': [...(defaultSchema.attributes?.['*'] || []), 'className'],
+  },
+};
+
 // Stable plugin arrays — created once, never cause re-renders
 const REMARK_PLUGINS = [remarkGfm];
-const REHYPE_PLUGINS = [rehypeRaw, rehypeHighlight];
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const REHYPE_PLUGINS: any[] = [rehypeRaw, [rehypeSanitize, SANITIZE_SCHEMA], rehypeHighlight];
 
 export const MarkdownRenderer = memo(function MarkdownRenderer({ content, className, basePath }: Props) {
   const t = useT();
@@ -301,7 +327,8 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({ content, classN
       if (className) return <code className={className}>{children}</code>;
 
       const text = extractText(children).trim();
-      if (FILE_PATH_RE.test(text) || KNOWN_EXT_RE.test(text)) {
+      const ext = text.split('.').pop()?.toLowerCase() ?? '';
+      if (((FILE_PATH_RE.test(text) || KNOWN_EXT_RE.test(text)) && KNOWN_FILE_EXTENSIONS.has(ext))) {
         const resolved = text.startsWith('/') || /^[a-zA-Z]:[/\\]/.test(text)
           ? text
           : resolveBase ? `${resolveBase.replace(/\/$/, '')}/${text}` : text;

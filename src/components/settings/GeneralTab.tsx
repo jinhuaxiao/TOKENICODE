@@ -1,5 +1,8 @@
+import { useRef, useCallback, useState } from 'react';
 import { useSettingsStore, MODEL_OPTIONS, ColorTheme } from '../../stores/settingsStore';
 import { useT } from '../../lib/i18n';
+import { AiAvatar } from '../shared/AiAvatar';
+import { AvatarCropModal } from './AvatarCropModal';
 
 const COLOR_THEMES: { id: ColorTheme; labelKey: string; preview: string; previewDark: string }[] = [
   {
@@ -68,9 +71,68 @@ export function GeneralTab() {
   const setLocale = useSettingsStore((s) => s.setLocale);
   const setSelectedModel = useSettingsStore((s) => s.setSelectedModel);
   const setFontSize = useSettingsStore((s) => s.setFontSize);
+  const aiAvatarUrl = useSettingsStore((s) => s.aiAvatarUrl);
+  const setAiAvatarUrl = useSettingsStore((s) => s.setAiAvatarUrl);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [cropFile, setCropFile] = useState<File | null>(null);
+
+  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setCropFile(file);
+    // Reset input so the same file can be re-selected
+    e.target.value = '';
+  }, []);
 
   return (
     <div className="space-y-6">
+      {/* AI Avatar */}
+      <div>
+        <h3 className="text-[13px] font-medium text-text-primary mb-3">{t('settings.aiAvatar')}</h3>
+        <div className="flex items-center gap-4">
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="group relative cursor-pointer"
+            title={t('settings.aiAvatarChange')}
+          >
+            <AiAvatar size="w-14 h-14" rounded="rounded-2xl" />
+            <div className="absolute inset-0 rounded-2xl bg-black/40 opacity-0 group-hover:opacity-100
+              transition-smooth flex items-center justify-center">
+              <svg width="18" height="18" viewBox="0 0 16 16" fill="none" stroke="white" strokeWidth="1.5" strokeLinecap="round">
+                <path d="M12 9v4H4V9M8 3v7M5 6l3-3 3 3" />
+              </svg>
+            </div>
+          </button>
+          {aiAvatarUrl && (
+            <button
+              onClick={() => setAiAvatarUrl('')}
+              className="text-[12px] text-text-muted hover:text-red-500 transition-smooth"
+            >
+              {t('settings.aiAvatarReset')}
+            </button>
+          )}
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={handleFileSelect}
+          />
+        </div>
+      </div>
+
+      {/* Avatar crop modal */}
+      {cropFile && (
+        <AvatarCropModal
+          imageFile={cropFile}
+          onSave={(dataUrl) => {
+            setAiAvatarUrl(dataUrl);
+            setCropFile(null);
+          }}
+          onCancel={() => setCropFile(null)}
+        />
+      )}
+
       {/* Theme Color — single row of 4 */}
       <div>
         <h3 className="text-[13px] font-medium text-text-primary mb-3">{t('settings.colorTheme')}</h3>

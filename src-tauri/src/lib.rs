@@ -77,7 +77,14 @@ fn is_valid_executable(path: &std::path::Path) -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        // Check MZ magic bytes (PE executable header)
+        // Script wrappers (.cmd, .bat, .ps1) are valid if they exist
+        if let Some(ext) = path.extension() {
+            let ext_lower = ext.to_string_lossy().to_lowercase();
+            if matches!(ext_lower.as_str(), "cmd" | "bat" | "ps1") {
+                return true;
+            }
+        }
+        // Binary executables — check MZ magic bytes (PE header)
         if let Ok(mut f) = std::fs::File::open(path) {
             use std::io::Read;
             let mut magic = [0u8; 2];
@@ -152,7 +159,7 @@ fn find_git_bash() -> Option<String> {
             let stdout = String::from_utf8_lossy(&output.stdout);
             if let Some(path) = stdout.lines().next() {
                 let path = path.trim().to_string();
-                if !path.is_empty() && std::path::Path::new(&path).exists() {
+                if !path.is_empty() && is_valid_executable(std::path::Path::new(&path)) {
                     return Some(path);
                 }
             }
@@ -170,7 +177,7 @@ fn find_claude_binary() -> Option<String> {
         // is a JavaScript script and causes error 193 on Windows.
         for name in &["claude.cmd", "claude.exe"] {
             let path = npm_bin.join(name);
-            if path.exists() {
+            if is_valid_executable(&path) {
                 return Some(path.to_string_lossy().to_string());
             }
         }
@@ -195,7 +202,7 @@ fn find_claude_binary() -> Option<String> {
         let names = &["claude"];
         for name in names {
             let path = npm_bin.join(name);
-            if path.exists() {
+            if is_valid_executable(&path) {
                 return Some(path.to_string_lossy().to_string());
             }
         }
@@ -226,7 +233,7 @@ fn find_claude_binary() -> Option<String> {
                         if p.extension().is_none() {
                             continue;
                         }
-                        if p.exists() {
+                        if is_valid_executable(p) {
                             return Some(path);
                         }
                     }
@@ -242,7 +249,7 @@ fn find_claude_binary() -> Option<String> {
         {
             if output.status.success() {
                 let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                if !path.is_empty() && std::path::Path::new(&path).exists() {
+                if !path.is_empty() && is_valid_executable(std::path::Path::new(&path)) {
                     return Some(path);
                 }
             }
@@ -293,20 +300,20 @@ fn find_claude_binary() -> Option<String> {
             if let Some(app_data) = dirs::data_dir() {
                 for name in ["claude.cmd", "claude.exe", "claude.ps1"] {
                     let candidate = app_data.join("npm").join(name);
-                    if candidate.exists() {
+                    if is_valid_executable(&candidate) {
                         return Some(candidate.to_string_lossy().to_string());
                     }
                 }
             }
             // Scoop: ~/scoop/shims/claude.cmd
             let scoop_candidate = home.join("scoop").join("shims").join("claude.cmd");
-            if scoop_candidate.exists() {
+            if is_valid_executable(&scoop_candidate) {
                 return Some(scoop_candidate.to_string_lossy().to_string());
             }
             // nvm-windows / fnm / volta node paths
             for sub in ["AppData\\Roaming\\nvm", ".volta\\bin", "AppData\\Local\\fnm_multishells"] {
                 let candidate = home.join(sub).join("claude.cmd");
-                if candidate.exists() {
+                if is_valid_executable(&candidate) {
                     return Some(candidate.to_string_lossy().to_string());
                 }
             }
@@ -317,7 +324,7 @@ fn find_claude_binary() -> Option<String> {
                 home.join(".npm-global/bin/claude"),
                 home.join(".local/bin/claude"),
             ] {
-                if candidate.exists() {
+                if is_valid_executable(&candidate) {
                     return Some(candidate.to_string_lossy().to_string());
                 }
             }
@@ -331,7 +338,7 @@ fn find_claude_binary() -> Option<String> {
             "/usr/local/bin/claude",
             "/opt/homebrew/bin/claude",
         ] {
-            if std::path::Path::new(candidate).exists() {
+            if is_valid_executable(std::path::Path::new(candidate)) {
                 return Some(candidate.to_string());
             }
         }
@@ -362,7 +369,7 @@ fn find_newest_version_bin(base_dir: &std::path::Path, bin_name: &str) -> Option
         });
         for entry in &versions {
             let bin = entry.path().join(bin_name);
-            if bin.exists() {
+            if is_valid_executable(&bin) {
                 return Some(bin.to_string_lossy().to_string());
             }
         }
@@ -864,6 +871,10 @@ async fn start_claude_session(
         "--verbose".to_string(),
         "--include-partial-messages".to_string(),
         "--replay-user-messages".to_string(),
+        // Skip global MCP servers from ~/.claude.json to avoid slow cold start.
+        // MCP servers (chrome-devtools, codex, gemini, pencil etc.) add 20-30s startup
+        // overhead as each must initialize before the CLI accepts input.
+        "--strict-mcp-config".to_string(),
     ];
 
     // Resume an existing CLI session if requested
@@ -884,19 +895,15 @@ async fn start_claude_session(
         }
     }
 
-    // Permission mode: use SDK control protocol for structured permission requests,
-    // or bypass permissions entirely (legacy behavior).
-    let permission_mode = params.permission_mode.as_deref().unwrap_or("bypassPermissions");
-    if permission_mode == "bypassPermissions" {
-        // Legacy: skip all permission checks
-        args.push("--dangerously-skip-permissions".to_string());
-    } else {
-        // SDK control protocol: structured permission requests via stdout/stdin
-        args.push("--permission-mode".to_string());
-        args.push(permission_mode.to_string());
-        args.push("--permission-prompt-tool".to_string());
-        args.push("stdio".to_string());
-    }
+    // Permission mode: all modes use --permission-prompt-tool stdio so the CLI
+    // routes user interactions (AskUserQuestion, ExitPlanMode) via control_request.
+    // In bypassPermissions mode the CLI auto-approves tool permissions internally
+    // (zero overhead) but still sends control_requests for user interactions.
+    let permission_mode = params.permission_mode.as_deref().unwrap_or("default");
+    args.push("--permission-mode".to_string());
+    args.push(permission_mode.to_string());
+    args.push("--permission-prompt-tool".to_string());
+    args.push("stdio".to_string());
 
     // Extended thinking + effort level
     let thinking_level = params.thinking_level.as_deref().unwrap_or("high");
@@ -1161,102 +1168,146 @@ async fn start_claude_session(
         let stream_event = format!("claude:stream:{}", sid_clone);
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
+        let mut line_count: u64 = 0;
+        let spawn_time = std::time::Instant::now();
         while let Ok(Some(line)) = lines.next_line().await {
+            line_count += 1;
+            // Log first 10 lines with timing to diagnose startup delay
+            if line_count <= 10 {
+                let elapsed = spawn_time.elapsed().as_millis();
+                let preview = if line.len() > 150 { &line[..150] } else { &line };
+                eprintln!("[TOKENICODE:stdout] #{} @{}ms type={} preview={}",
+                    line_count, elapsed,
+                    serde_json::from_str::<Value>(&line).ok()
+                        .and_then(|v| v.get("type").and_then(|t| t.as_str().map(String::from)))
+                        .unwrap_or_else(|| "?".into()),
+                    preview);
+            }
             // Parse every line as a JSON Value first (avoids serde enum pitfalls)
             let json = match serde_json::from_str::<Value>(&line) {
                 Ok(v) => v,
                 Err(_) => continue, // skip non-JSON lines
             };
 
-            // Intercept control_request messages for SDK protocol routing
-            if !is_bypass {
-                if let Some("control_request") = json.get("type").and_then(|v| v.as_str()) {
-                    // Extract request_id (handle both snake_case and camelCase)
-                    let request_id = json.get("request_id")
-                        .or_else(|| json.get("requestId"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
+            // Intercept control_request messages for SDK control protocol routing.
+            // All modes use --permission-prompt-tool stdio. In bypass mode, we
+            // auto-approve tool permissions here (zero frontend overhead) but route
+            // user interactions (AskUserQuestion) to the frontend.
+            if let Some("control_request") = json.get("type").and_then(|v| v.as_str()) {
+                let request_id = json.get("request_id")
+                    .or_else(|| json.get("requestId"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string();
 
-                    if let Some(request) = json.get("request") {
-                        let subtype = request.get("subtype").and_then(|v| v.as_str()).unwrap_or_default();
-                        match subtype {
-                            "can_use_tool" => {
-                                let tool_name = request.get("tool_name")
-                                    .or_else(|| request.get("toolName"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or_default()
-                                    .to_string();
-                                let input = request.get("input").cloned().unwrap_or(Value::Null);
-                                let description = request.get("description")
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from);
-                                let tool_use_id = request.get("tool_use_id")
+                if let Some(request) = json.get("request") {
+                    let subtype = request.get("subtype").and_then(|v| v.as_str()).unwrap_or_default();
+
+                    // Bypass mode: auto-approve everything except user interactions.
+                    if is_bypass {
+                        let tool_name = request.get("tool_name")
+                            .or_else(|| request.get("toolName"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default();
+                        if tool_name != "AskUserQuestion" {
+                            let mut allow = serde_json::json!({ "behavior": "allow" });
+                            if subtype == "can_use_tool" {
+                                allow["updatedInput"] = request.get("input").cloned()
+                                    .unwrap_or(Value::Object(serde_json::Map::new()));
+                                if let Some(id) = request.get("tool_use_id")
                                     .or_else(|| request.get("toolUseId"))
-                                    .and_then(|v| v.as_str())
-                                    .map(String::from);
-
-                                eprintln!("[TOKENICODE] permission request: tool={} request_id={}", tool_name, request_id);
-
-                                // Emit as a special stream message (reuses the working stream channel)
-                                let perm_payload = serde_json::json!({
-                                    "type": "tokenicode_permission_request",
-                                    "request_id": request_id,
-                                    "tool_name": tool_name,
-                                    "input": input,
-                                    "description": description,
-                                    "tool_use_id": tool_use_id,
-                                });
-                                let _ = emit_to_frontend(&app_clone, &stream_event, perm_payload);
-                                continue; // Don't forward to stream as normal msg
+                                    .and_then(|v| v.as_str()) {
+                                    allow["toolUseID"] = Value::String(id.to_string());
+                                }
                             }
-                            "hook_callback" => {
-                                // Auto-allow hook callbacks (TOKENICODE doesn't manage hooks)
-                                let auto_resp = serde_json::json!({
-                                    "type": "control_response",
-                                    "response": {
-                                        "subtype": "success",
-                                        "request_id": request_id,
-                                        "response": { "behavior": "allow" }
-                                    }
-                                });
-                                let _ = stdin_clone.send(&sid_clone, &auto_resp.to_string()).await;
-                                continue;
-                            }
-                            other => {
-                                // Unknown control request subtype — auto-allow to not block CLI
-                                eprintln!("[TOKENICODE] control_request/{}: auto-allowing (request_id={})", other, request_id);
-                                let auto_resp = serde_json::json!({
-                                    "type": "control_response",
-                                    "response": {
-                                        "subtype": "success",
-                                        "request_id": request_id,
-                                        "response": { "behavior": "allow" }
-                                    }
-                                });
-                                let _ = stdin_clone.send(&sid_clone, &auto_resp.to_string()).await;
-                                continue;
-                            }
+                            let resp = serde_json::json!({
+                                "type": "control_response",
+                                "response": { "subtype": "success", "request_id": request_id, "response": allow }
+                            });
+                            let _ = stdin_clone.send(&sid_clone, &resp.to_string()).await;
+                            continue;
                         }
-                    } else {
-                        eprintln!("[TOKENICODE] control_request missing 'request' field: {}", &line[..line.len().min(200)]);
-                        // Auto-allow to avoid blocking CLI
-                        let auto_resp = serde_json::json!({
-                            "type": "control_response",
-                            "response": {
-                                "subtype": "success",
-                                "request_id": request_id,
-                                "response": { "behavior": "allow" }
-                            }
-                        });
-                        let _ = stdin_clone.send(&sid_clone, &auto_resp.to_string()).await;
-                        continue;
+                        // AskUserQuestion: fall through to frontend routing
                     }
+
+                    match subtype {
+                        "can_use_tool" => {
+                            let tool_name = request.get("tool_name")
+                                .or_else(|| request.get("toolName"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            let input = request.get("input").cloned().unwrap_or(Value::Null);
+                            let description = request.get("description")
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+                            let tool_use_id = request.get("tool_use_id")
+                                .or_else(|| request.get("toolUseId"))
+                                .and_then(|v| v.as_str())
+                                .map(String::from);
+
+                            eprintln!("[TOKENICODE] permission request: tool={} request_id={}", tool_name, request_id);
+
+                            // Emit as a special stream message (reuses the working stream channel)
+                            let perm_payload = serde_json::json!({
+                                "type": "tokenicode_permission_request",
+                                "request_id": request_id,
+                                "tool_name": tool_name,
+                                "input": input,
+                                "description": description,
+                                "tool_use_id": tool_use_id,
+                            });
+                            let _ = emit_to_frontend(&app_clone, &stream_event, perm_payload);
+                            continue; // Don't forward to stream as normal msg
+                        }
+                        "hook_callback" => {
+                            // Auto-allow hook callbacks (TOKENICODE doesn't manage hooks)
+                            let auto_resp = serde_json::json!({
+                                "type": "control_response",
+                                "response": {
+                                    "subtype": "success",
+                                    "request_id": request_id,
+                                    "response": { "behavior": "allow" }
+                                }
+                            });
+                            let _ = stdin_clone.send(&sid_clone, &auto_resp.to_string()).await;
+                            continue;
+                        }
+                        other => {
+                            // Unknown control request subtype — deny by default (P0-4 fix)
+                            eprintln!("[TOKENICODE] control_request/{}: denying unknown subtype (request_id={})", other, request_id);
+                            let deny_resp = serde_json::json!({
+                                "type": "control_response",
+                                "response": {
+                                    "subtype": "success",
+                                    "request_id": request_id,
+                                    "response": { "behavior": "deny", "message": format!("Unknown permission type '{}' denied by TOKENICODE", other) }
+                                }
+                            });
+                            let _ = stdin_clone.send(&sid_clone, &deny_resp.to_string()).await;
+                            continue;
+                        }
+                    }
+                } else {
+                    eprintln!("[TOKENICODE] control_request missing 'request' field: {}", &line[..line.len().min(200)]);
+                    // Auto-allow to avoid blocking CLI
+                    let auto_resp = serde_json::json!({
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": { "behavior": "allow" }
+                        }
+                    });
+                    let _ = stdin_clone.send(&sid_clone, &auto_resp.to_string()).await;
+                    continue;
                 }
             }
 
             // Normal message — forward to frontend stream
-            let _ = emit_to_frontend(&app_clone, &stream_event, json);
+            if let Err(e) = emit_to_frontend(&app_clone, &stream_event, json) {
+                eprintln!("[TOKENICODE] emit_to_frontend failed: {}", e);
+            }
         }
         // Emit process_exit on the stream channel (primary detection)
         let _ = emit_to_frontend(
@@ -1490,10 +1541,20 @@ async fn delete_session(session_id: String, session_path: String) -> Result<(), 
         std::fs::write(&track_path, contents.join("\n") + "\n")
             .map_err(|e| format!("Failed to update tracked sessions: {}", e))?;
     }
-    // Delete the .jsonl file
-    if !session_path.is_empty() && std::path::Path::new(&session_path).exists() {
-        std::fs::remove_file(&session_path)
-            .map_err(|e| format!("Failed to delete session file: {}", e))?;
+    // Delete the .jsonl file — validate path is under ~/.claude/projects/ (P0-1 fix)
+    if !session_path.is_empty() {
+        let target = std::path::Path::new(&session_path);
+        if target.exists() {
+            let canonical = target.canonicalize()
+                .map_err(|e| format!("Failed to canonicalize path: {}", e))?;
+            let home = dirs::home_dir().ok_or("Cannot find home dir")?;
+            let allowed_dir = home.join(".claude").join("projects");
+            if !canonical.starts_with(&allowed_dir) {
+                return Err(format!("Refusing to delete file outside ~/.claude/projects/: {:?}", canonical));
+            }
+            std::fs::remove_file(&canonical)
+                .map_err(|e| format!("Failed to delete session file: {}", e))?;
+        }
     }
     Ok(())
 }
@@ -2939,6 +3000,30 @@ async fn run_git_command(cwd: String, args: Vec<String>) -> Result<String, Strin
         return Err(format!("Git subcommand '{}' not allowed", subcmd));
     }
 
+    // P1-1: Reject null bytes in args (could truncate strings in C-level APIs)
+    for arg in &args {
+        if arg.contains('\0') {
+            return Err("Arguments must not contain null bytes".to_string());
+        }
+    }
+
+    // P1-1: Validate cwd is an existing directory
+    let cwd_path = std::path::Path::new(&cwd);
+    if !cwd_path.is_dir() {
+        return Err(format!("Working directory does not exist: {}", cwd));
+    }
+
+    // P1-1: Reject dangerous git flags that could enable command execution
+    let dangerous_prefixes = ["-c", "--exec", "--upload-pack", "--receive-pack"];
+    for arg in &args[1..] {
+        let lower = arg.to_lowercase();
+        for prefix in &dangerous_prefixes {
+            if lower == *prefix || lower.starts_with(&format!("{}=", prefix)) {
+                return Err(format!("Git flag '{}' not allowed", arg));
+            }
+        }
+    }
+
     // On macOS, resolve git binary without triggering Xcode CLT popup
     #[cfg(target_os = "macos")]
     let git_bin = resolve_git_binary()
@@ -2967,6 +3052,17 @@ async fn run_git_command(cwd: String, args: Vec<String>) -> Result<String, Strin
 /// This delegates file restoration to the CLI's native checkpoint system.
 #[tauri::command]
 async fn rewind_files(session_id: String, checkpoint_uuid: String, cwd: String) -> Result<String, String> {
+    // P1-1: Validate session_id and checkpoint_uuid look like UUIDs (hex + hyphens only)
+    fn is_uuid_like(s: &str) -> bool {
+        s.len() >= 32 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+    }
+    if !is_uuid_like(&session_id) {
+        return Err(format!("Invalid session_id format: {}", session_id));
+    }
+    if !is_uuid_like(&checkpoint_uuid) {
+        return Err(format!("Invalid checkpoint_uuid format: {}", checkpoint_uuid));
+    }
+
     let claude_bin = find_claude_binary().unwrap_or_else(|| {
         #[cfg(target_os = "windows")]
         { "claude.cmd".to_string() }
@@ -3013,6 +3109,12 @@ struct CliStatus {
 /// and return its combined stdout/stderr output.
 #[tauri::command]
 async fn run_claude_command(subcommand: String, cwd: Option<String>) -> Result<String, String> {
+    // P1-1: Allowlist safe subcommands
+    let allowed = ["doctor", "--version", "config", "mcp"];
+    if !allowed.contains(&subcommand.as_str()) {
+        return Err(format!("Claude subcommand '{}' not allowed", subcommand));
+    }
+
     let binary = find_claude_binary()
         .ok_or_else(|| "Claude CLI not found".to_string())?;
     let enriched_path = build_enriched_path();
@@ -3116,7 +3218,17 @@ async fn check_claude_cli() -> Result<CliStatus, String> {
                             };
                         }
                     }
-                    None
+                    // TK-319: Binary found but can't be executed → report as not installed
+                    #[cfg(target_os = "windows")]
+                    let git_bash_missing = find_git_bash().is_none();
+                    #[cfg(not(target_os = "windows"))]
+                    let git_bash_missing = false;
+                    return Ok(CliStatus {
+                        installed: false,
+                        path: Some(path),
+                        version: None,
+                        git_bash_missing,
+                    });
                 }
             };
             // On Windows, check if git-bash is available (hard requirement for Claude Code)

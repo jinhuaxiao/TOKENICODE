@@ -6,6 +6,68 @@ All notable changes to TOKENICODE will be documented in this file.
 
 ---
 
+## [0.8.1] - 2026-03-02
+
+### Added
+
+- **AI avatar customization (TK-327)** — Users can now set a custom AI chat avatar via Settings → General. Includes an interactive crop modal with drag-to-reposition and scroll/button zoom. The default `</>` icon can be restored anytime.
+
+### Fixed
+
+#### Security
+
+- **Path traversal in session deletion (P0-1)** — `delete_session` now canonicalizes the path and validates it resides within `~/.claude/projects/` before deleting.
+
+- **Orphaned CLI processes (P0-2)** — `kill_session` now calls `child.kill().await` before removing the entry from the process map, ensuring CLI processes are actually terminated.
+
+- **Default permission mode too permissive (P0-3)** — Changed default `permission_mode` from `"bypassPermissions"` to `"default"`. New sessions now prompt for tool permissions.
+
+- **Unknown permission types auto-allowed (P0-4)** — Unrecognized `control_request` subtypes now respond with `"deny"` instead of `"allow"`, preventing future SDK additions from being silently approved.
+
+- **Event listener leak on retry (P0-5)** — Fixed three leak paths: stdin write failure, new session spawn, and retry failure. Old Tauri event listeners are now properly cleaned up in all cases.
+
+- **XSS via Markdown and HTML preview (P0-7)** — Added `rehype-sanitize` to `MarkdownRenderer` (alongside `rehypeRaw`). Escaped file path in `injectBaseTag()` to prevent attribute injection.
+
+- **Git parameter injection (P1-1)** — `run_git_command` now rejects dangerous flags (`-c`, `--exec`, `--upload-pack`, `--receive-pack`) in addition to the existing subcommand allowlist.
+
+- **Stdin race condition (P1-2)** — `StdinManager::send()` now writes message + newline as a single `write_all` call, preventing interleaved NDJSON from concurrent sends.
+
+#### Stability
+
+- **Stream message error boundary (P1-4)** — `handleStreamMessage()` is now wrapped in try-catch. Uncaught exceptions log to console and show an error message instead of crashing the stream pipeline.
+
+- **Session cache unbounded growth (P1-5)** — `sessionCache` now uses LRU eviction (max 20 entries). Accessing or saving a session refreshes its position.
+
+- **Auto-compact processing card stuck forever (FI-4)** — Fixed root cause: auto-compact was not registering `pendingCommandMsgId`, so the result handler could never mark it completed. Added 90-second timeout as a safety net.
+
+#### Functional
+
+- **Sidebar running indicator stale after tab switch (FI-1)** — `restoreFromCache()` now syncs `setSessionRunning()` to keep the sidebar indicator accurate.
+
+- **System messages silently dropped (FI-3)** — `system` message handler now surfaces `error` subtypes as chat messages and logs unknown subtypes for debugging, instead of silently discarding everything except `init`.
+
+- **AskUserQuestion form skipped (TK-326)** — Resolved by P0-4 fix (unknown control_request subtypes now default to deny).
+
+- **CLI detection accepts invalid binaries (TK-315)** — `find_claude_binary()` now validates all discovered paths with `is_valid_executable()` (permission + magic-byte checks on Unix, MZ header checks for `.exe` on Windows) instead of bare `.exists()`. Windows script wrappers (`.cmd`/`.bat`/`.ps1`) are exempt from header checks. Also applied to `find_newest_version_bin()`.
+
+- **CLI reported as installed when not executable (TK-319)** — `check_claude_cli()` now returns `installed: false` when `--version` fails to execute (IO error), instead of silently falling through to `installed: true`. Windows error-193 handling preserved.
+
+- **Settings CLI tab inconsistent with Setup Wizard (TK-316)** — CliTab now shows amber `⚠` indicator (instead of green `✓`) when `git_bash_missing` is true, and highlights the install button to guide the user toward fixing the issue.
+
+- **Normal text misidentified as file paths (TK-323)** — `wrapBareFilePaths` no longer wraps paths with unknown extensions (e.g. `/api/chat.completions`). Both the pre-processing step and the inline `code` handler now validate extensions against a shared `KNOWN_FILE_EXTENSIONS` set of 80+ code/config file types.
+
+- **Long thinking causes duplicate messages and lost text** — Thinking blocks in `useStreamProcessor` now use stable IDs (`${uuid}_thinking_${blockIdx}`) instead of random IDs. Previously, each `--include-partial-messages` delivery created a new thinking message, causing hundreds of duplicates during extended thinking sessions (~300-600 over 10 minutes). This bloated the message array, degraded UI performance, and buried the actual text response below the fold. With stable IDs, thinking blocks update in place via `addMessage` de-duplication, matching the existing pattern for text blocks.
+
+- **Bypass mode hangs on control_request (TK-328)** — The Rust stdout reader now intercepts `control_request` messages in ALL permission modes, not just non-bypass. Previously, if the CLI sent a `control_request` in bypass mode (e.g. `hook_callback` or protocol changes in newer CLI versions), Rust forwarded it as a normal JSON message. The frontend had no handler for raw `control_request` and silently dropped it, while the CLI blocked waiting for a `control_response` that never came. This caused the UI to show a perpetual "thinking" indicator with no content, even though the CLI had already written partial results to its session file (visible after app restart). The fix auto-approves all control requests in bypass mode, preventing CLI hangs.
+
+### Performance
+
+- **Skip global MCP servers for faster cold start** — CLI now starts with `--strict-mcp-config`, bypassing all MCP servers configured in `~/.claude.json`. This eliminates 20-30s of MCP initialization overhead on first response. TOKENICODE users don't need MCP servers (chrome-devtools, codex, gemini, etc.) — those are developer tools, not chat client features.
+
+- **Removed dead `dangerously_skip_permissions` field** — Cleaned up the deprecated field from `StartSessionParams` (Rust struct, TypeScript interface, and all 3 call sites). The unified `--permission-mode` + `--permission-prompt-tool stdio` architecture makes this flag unnecessary.
+
+---
+
 ## [0.8.0] - 2026-03-01
 
 ### Added

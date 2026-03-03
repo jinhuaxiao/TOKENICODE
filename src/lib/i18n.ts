@@ -279,6 +279,12 @@ const messages: Record<Locale, Record<string, string>> = {
 
     // Settings
     'settings.title': '设置',
+    'settings.aiAvatar': 'AI 头像',
+    'settings.aiAvatarChange': '点击更换头像',
+    'settings.aiAvatarReset': '恢复默认',
+    'settings.aiAvatarCrop': '修改头像',
+    'settings.aiAvatarCancel': '取消',
+    'settings.aiAvatarSave': '保存',
     'settings.colorTheme': '主题颜色',
     'settings.black': '黑色',
     'settings.orange': '橘色',
@@ -886,6 +892,12 @@ const messages: Record<Locale, Record<string, string>> = {
 
     // Settings
     'settings.title': 'Settings',
+    'settings.aiAvatar': 'AI Avatar',
+    'settings.aiAvatarChange': 'Click to change avatar',
+    'settings.aiAvatarReset': 'Reset to default',
+    'settings.aiAvatarCrop': 'Edit Avatar',
+    'settings.aiAvatarCancel': 'Cancel',
+    'settings.aiAvatarSave': 'Save',
     'settings.colorTheme': 'Color Theme',
     'settings.black': 'Black',
     'settings.orange': 'Orange',

@@ -9,7 +9,6 @@ export interface StartSessionParams {
   model?: string;
   session_id?: string;
   allowed_tools?: string[];
-  dangerously_skip_permissions?: boolean;
   /** Resume an existing Claude CLI session by ID (for follow-up messages) */
   resume_session_id?: string;
   /** Thinking effort level: 'off' | 'low' | 'medium' | 'high' | 'max' */

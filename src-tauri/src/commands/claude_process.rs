@@ -44,10 +44,10 @@ impl StdinManager {
     pub async fn send(&self, id: &str, message: &str) -> Result<(), String> {
         let mut map = self.handles.lock().await;
         if let Some(stdin) = map.get_mut(id) {
-            stdin.write_all(message.as_bytes()).await
+            // Atomic write: message + newline in one call to prevent interleaving (P1-2 fix)
+            let payload = format!("{}\n", message);
+            stdin.write_all(payload.as_bytes()).await
                 .map_err(|e| format!("Failed to write to stdin: {}", e))?;
-            stdin.write_all(b"\n").await
-                .map_err(|e| format!("Failed to write newline: {}", e))?;
             stdin.flush().await
                 .map_err(|e| format!("Failed to flush stdin: {}", e))?;
             Ok(())
@@ -76,7 +76,13 @@ impl ProcessManager {
 
     pub async fn remove(&self, id: &str) {
         let mut map = self.processes.lock().await;
-        map.remove(id);
+        if let Some(proc) = map.remove(id) {
+            // Actually kill the child process to prevent zombie leaks (P0-2 fix)
+            let mut managed = proc.lock().await;
+            if let Err(e) = managed.child.kill().await {
+                eprintln!("[TOKENICODE] Failed to kill process for session {}: {}", id, e);
+            }
+        }
     }
 }
 
@@ -87,7 +93,6 @@ pub struct StartSessionParams {
     pub model: Option<String>,
     pub session_id: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
-    pub dangerously_skip_permissions: Option<bool>,
     /// When set, resume an existing Claude CLI session instead of starting a new one.
     /// The value should be the Claude CLI session ID (UUID).
     pub resume_session_id: Option<String>,

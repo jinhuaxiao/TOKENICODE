@@ -115,7 +115,16 @@ export function QuestionCard({ message, floating }: Props) {
       });
       setInteractionState(message.id, 'sending');
       try {
-        await bridge.sendStdin(stdinId, JSON.stringify({ answers }));
+        // If this question arrived via SDK control_request (permissionData present),
+        // respond via respondPermission with answers in updatedInput.
+        // Otherwise use sendStdin (legacy streaming path).
+        const permData = message.permissionData;
+        if (permData?.requestId) {
+          const updatedInput = { ...message.toolInput, answers };
+          await bridge.respondPermission(stdinId, permData.requestId, true, undefined, permData.toolUseId, updatedInput);
+        } else {
+          await bridge.sendStdin(stdinId, JSON.stringify({ answers }));
+        }
         setInteractionState(message.id, 'resolved');
         useChatStore.setState({ partialText: '', partialThinking: '' });
         setSessionStatus('running');
@@ -126,7 +135,7 @@ export function QuestionCard({ message, floating }: Props) {
     } else {
       setCurrentIdx(currentIdx + 1);
     }
-  }, [isFullyResolved, isSending, currentIdx, questions, selectedMap, useOther, otherText, message.id, getCurrentAnswer]);
+  }, [isFullyResolved, isSending, currentIdx, questions, selectedMap, useOther, otherText, message.id, message.permissionData, message.toolInput, getCurrentAnswer]);
 
   const handleSkip = useCallback(async () => {
     if (isFullyResolved || isSending) return;
@@ -135,7 +144,13 @@ export function QuestionCard({ message, floating }: Props) {
     if (!stdinId) return;
     setInteractionState(message.id, 'sending');
     try {
-      await bridge.sendStdin(stdinId, JSON.stringify({ answers: {} }));
+      const permData = message.permissionData;
+      if (permData?.requestId) {
+        const updatedInput = { ...message.toolInput, answers: {} };
+        await bridge.respondPermission(stdinId, permData.requestId, true, undefined, permData.toolUseId, updatedInput);
+      } else {
+        await bridge.sendStdin(stdinId, JSON.stringify({ answers: {} }));
+      }
       setInteractionState(message.id, 'resolved');
       useChatStore.setState({ partialText: '', partialThinking: '' });
       setSessionStatus('running');

@@ -790,8 +790,12 @@ export function InputBar() {
             }
           } catch (stdinErr) {
             // stdin write failed (broken pipe — process already exited).
-            // Clear the dead stdinId and fall through to spawn a new process.
+            // Clean up dead listeners (P0-5 fix) and fall through to spawn a new process.
             console.warn('[TOKENICODE] sendStdin failed, spawning new process:', stdinErr);
+            if ((window as any).__claudeUnlisteners?.[stdinId]) {
+              (window as any).__claudeUnlisteners[stdinId]();
+              delete (window as any).__claudeUnlisteners[stdinId];
+            }
             setSessionMeta({ stdinId: undefined });
             stdinId = undefined;
           }
@@ -813,10 +817,16 @@ export function InputBar() {
           ? rawSessionId
           : undefined;
 
-        // Clean up previous stream listeners
+        // Clean up previous stream listeners (P0-5: also remove from per-stdinId dict)
         if ((window as any).__claudeUnlisten) {
           (window as any).__claudeUnlisten();
           (window as any).__claudeUnlisten = null;
+        }
+        // Clean stale entries from the per-stdinId dictionary
+        const oldStdinId = useChatStore.getState().sessionMeta.stdinId;
+        if (oldStdinId && (window as any).__claudeUnlisteners?.[oldStdinId]) {
+          (window as any).__claudeUnlisteners[oldStdinId]();
+          delete (window as any).__claudeUnlisteners[oldStdinId];
         }
 
         const cwd = workingDirectory;
@@ -908,7 +918,6 @@ export function InputBar() {
           cwd,
           model: resolveModelForProvider(selectedModel),
           session_id: preGeneratedId,
-          dangerously_skip_permissions: liveSessionMode === 'bypass',
           resume_session_id: existingSessionId || undefined,
           thinking_level: useSettingsStore.getState().thinkingLevel,
           session_mode: (liveSessionMode === 'ask' || liveSessionMode === 'plan') ? liveSessionMode : undefined,
@@ -967,9 +976,9 @@ export function InputBar() {
     const { addMessage } = useChatStore.getState();
 
     // Detect ExitPlanMode prompt — create plan_review card as fallback (Plan mode only).
-    // In Code mode the CLI handles this natively.
+    // In Code/Bypass modes the CLI or Rust backend handles this — no UI card needed.
     if (/(?:Exit|Leave)\s+plan\s+mode/i.test(clean)
-        && ['plan', 'bypass'].includes(useSettingsStore.getState().sessionMode)) {
+        && useSettingsStore.getState().sessionMode === 'plan') {
       const store = useChatStore.getState();
       const existingReview = store.messages.find(
         (m) => m.id === 'plan_review_current' && m.type === 'plan_review',
@@ -1008,14 +1017,22 @@ export function InputBar() {
   // process_exit) are processed immediately — not deferred until user sends.
   // Without this, a pre-warm process_exit would be silently dropped and stdinId
   // would remain set, causing sendStdin to write to a dead process.
+  //
+  // IMPORTANT: We intentionally do NOT clear __claudeStreamHandler in the cleanup.
+  // During React's effect cycle (cleanup → setup), there's a micro-window where
+  // the handler is null. If a Tauri event arrives during this window, it would be
+  // silently dropped — causing the "no reply" bug where the CLI generates content
+  // but the UI never shows it. The handler uses getState() internally so a stale
+  // reference is safe.
   useEffect(() => {
     (window as any).__claudeStreamHandler = handleStreamMessage;
-    return () => {
-      // Only clear if it's still our handler (avoid clobbering a newer one)
-      if ((window as any).__claudeStreamHandler === handleStreamMessage) {
-        (window as any).__claudeStreamHandler = null;
-      }
-    };
+    // Drain any events that were queued while handler was unavailable
+    const queue: any[] = (window as any).__claudeStreamQueue;
+    if (queue && queue.length > 0) {
+      console.warn(`[TOKENICODE] draining ${queue.length} queued stream events on handler mount`);
+      const pending = queue.splice(0);
+      for (const msg of pending) handleStreamMessage(msg);
+    }
   }, [handleStreamMessage]);
 
   // --- Keyboard handler ---
