@@ -13,14 +13,44 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.8.4',
+    date: '2026-03-04',
+    highlights: {
+      zh: [
+        'CLI 发现优先级修复 — 系统已安装的 CLI 优先于自部署版本，登录状态正确共享',
+        '第三方 API 模型拦截 — 未配置模型映射时阻止发送并提示，不再把原始模型名发给第三方报错',
+        '继承配置修复 — 不再意外清除系统环境变量，继承模式正常使用系统 API Key',
+        '连接测试三步走 — 分步检测连通性、Key 有效性、模型可用性，精准定位问题',
+        '标题生成适配第三方 — 使用 provider 映射的 haiku 模型生成标题，无映射时静默跳过',
+        '自部署 CLI 注入 shell PATH — macOS/Linux 安装后自动写入 ~/.zshrc 等，终端可直接用 claude',
+        '用户头像与昵称 — 设置中自定义头像和显示名，聊天气泡右侧展示',
+        '修复多窗口串消息 — 切换对话窗口后，后台会话的回复不再串到前台窗口',
+        '隐藏模式选择按钮 — 默认 Bypass 模式，高级用户可通过 /ask /plan /code /bypass 斜杠命令切换',
+      ],
+      en: [
+        'CLI discovery priority fix — System-installed CLI takes precedence over self-deployed, login state shared correctly',
+        'Third-party API model interception — Blocks send when model mapping is missing, prevents raw model name errors',
+        'Inherit config fix — No longer clears system env vars, inherited mode correctly uses system API Key',
+        'Three-step connection test — Separately checks connectivity, auth, and model availability for precise diagnostics',
+        'Title generation adapts to providers — Uses provider-mapped haiku model, silently skips when unmapped',
+        'Self-deployed CLI injects shell PATH — macOS/Linux auto-writes to ~/.zshrc etc., claude works from terminal',
+        'User avatar & display name — Customize in Settings, shown next to chat bubbles',
+        'Fix cross-tab message leaking — Background session responses no longer bleed into the active tab',
+        'Hide mode selector buttons — Defaults to Bypass mode, power users switch via /ask /plan /code /bypass commands',
+      ],
+    },
+  },
+  {
     version: '0.8.3',
     date: '2026-03-04',
     highlights: {
       zh: [
         '文件右键新增「分享...」和「分享到微信」（macOS）',
+        '文件夹图标使用主题色，更容易区分文件和文件夹',
       ],
       en: [
         'Add "Share..." and "Share to WeChat" to file context menu (macOS)',
+        'Folder icons now use accent color for better distinction',
       ],
     },
   },

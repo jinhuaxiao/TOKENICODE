@@ -9,6 +9,7 @@ use tokio::sync::Mutex;
 pub struct SessionInfo {
     pub session_id: String,
     pub pid: u32,
+    pub cli_path: String,
 }
 
 #[derive(Debug)]

@@ -3,7 +3,7 @@ import { useChatStore, generateMessageId } from '../../stores/chatStore';
 import { useSettingsStore, MODEL_OPTIONS, mapSessionModeToPermissionMode, type ThinkingLevel } from '../../stores/settingsStore';
 import { bridge, onClaudeStream, onClaudeStderr, onSessionExit, onPermissionRequest, type UnifiedCommand, type PermissionRequest } from '../../lib/tauri-bridge';
 import { ModelSelector } from './ModelSelector';
-import { ModeSelector } from './ModeSelector';
+// import { ModeSelector } from './ModeSelector';
 import { FileUploadChips } from './FileUploadChips';
 import { RewindPanel } from './RewindPanel';
 import { useFileAttachments } from '../../hooks/useFileAttachments';
@@ -14,7 +14,7 @@ import { useSessionStore } from '../../stores/sessionStore';
 import { useT } from '../../lib/i18n';
 import { SlashCommandPopover, getFilteredCommandList } from './SlashCommandPopover';
 import { useCommandStore } from '../../stores/commandStore';
-import { envFingerprint, resolveModelForProvider } from '../../lib/api-provider';
+import { envFingerprint, resolveModelForProvider, resolveModelOrError } from '../../lib/api-provider';
 import { useProviderStore } from '../../stores/providerStore';
 import { stripAnsi } from '../../lib/strip-ansi';
 import { usePlanPanelStore } from './ChatPanel';
@@ -435,6 +435,10 @@ export function InputBar() {
         useSettingsStore.getState().setSessionMode('code');
         feedback('mode', t('cmd.switchedToCode'), { mode: 'code', icon: '⚡' });
         return;
+      case 'bypass':
+        useSettingsStore.getState().setSessionMode('bypass');
+        feedback('mode', t('cmd.switchedToBypass'), { mode: 'bypass', icon: '🔓' });
+        return;
 
       // --- Session management ---
       case 'clear':
@@ -655,10 +659,10 @@ export function InputBar() {
       const cmdPart = parts[0].toLowerCase();
       const restText = parts.slice(1).join(' ').trim();
 
-      // Mode-switching commands: /ask, /plan, /code
+      // Mode-switching commands: /ask, /plan, /code, /bypass
       // If followed by text, switch mode then submit the text normally
-      const modeMap: Record<string, 'ask' | 'plan' | 'code'> = {
-        '/ask': 'ask', '/plan': 'plan', '/code': 'code',
+      const modeMap: Record<string, 'ask' | 'plan' | 'code' | 'bypass'> = {
+        '/ask': 'ask', '/plan': 'plan', '/code': 'code', '/bypass': 'bypass',
       };
       if (modeMap[cmdPart]) {
         useSettingsStore.getState().setSessionMode(modeMap[cmdPart]);
@@ -755,7 +759,34 @@ export function InputBar() {
     });
 
     try {
-      if (!workingDirectory) return;
+      if (!workingDirectory) {
+        setSessionStatus('error');
+        addMessage({
+          id: generateMessageId(),
+          role: 'system',
+          type: 'text',
+          content: 'No working directory selected. Please select a project folder first.',
+          timestamp: Date.now(),
+        });
+        return;
+      }
+
+      // Check model mapping before sending — block if provider has no mapping for selected tier
+      const modelResolution = resolveModelOrError(selectedModel);
+      if (!modelResolution.ok) {
+        const msg = t('provider.noModelMapping')
+          .replace('{provider}', modelResolution.providerName)
+          .replace('{tier}', modelResolution.tier);
+        addMessage({
+          id: generateMessageId(),
+          role: 'system',
+          type: 'text',
+          content: msg,
+          timestamp: Date.now(),
+        });
+        setSessionStatus('error');
+        return;
+      }
 
       // Use stdinId (desk-generated) for stdin communication, not CLI's own sessionId.
       // stdinId exists when: (a) a pre-warmed process is waiting, or (b) follow-up in active session.
@@ -877,6 +908,32 @@ export function InputBar() {
         const unlistenPermission = await onPermissionRequest(
           preGeneratedId,
           (req: PermissionRequest) => {
+            // Background routing: check if this stdinId belongs to a non-active tab
+            const reqOwnerTabId = useSessionStore.getState().getTabForStdin(preGeneratedId);
+            const reqActiveTabId = useSessionStore.getState().selectedSessionId;
+            if (reqOwnerTabId && reqOwnerTabId !== reqActiveTabId) {
+              // Route to background cache instead of foreground
+              const cache = useChatStore.getState();
+              cache.addMessageToCache(reqOwnerTabId, {
+                id: generateMessageId(),
+                role: 'assistant',
+                type: 'permission',
+                content: req.description || `${req.tool_name} wants to execute`,
+                permissionTool: req.tool_name,
+                permissionDescription: req.description || '',
+                timestamp: Date.now(),
+                interactionState: 'pending',
+                permissionData: {
+                  requestId: req.request_id,
+                  toolName: req.tool_name,
+                  input: req.input,
+                  description: req.description,
+                  toolUseId: req.tool_use_id,
+                },
+              });
+              cache.setActivityInCache(reqOwnerTabId, { phase: 'awaiting' });
+              return;
+            }
             const { addMessage, setActivityStatus } = useChatStore.getState();
             addMessage({
               id: generateMessageId(),
@@ -931,6 +988,7 @@ export function InputBar() {
         // Read sessionMode from store (not closure) so plan-approve → code
         // mode switch is visible even when called via rAF.
         const liveSessionMode = useSettingsStore.getState().sessionMode;
+        console.log('[TOKENICODE:session] starting session', { cwd, stdinId: preGeneratedId, mode: liveSessionMode, provider: useProviderStore.getState().activeProviderId });
         const session = await bridge.startSession({
           prompt: text,
           cwd,
@@ -942,6 +1000,7 @@ export function InputBar() {
           provider_id: useProviderStore.getState().activeProviderId || undefined,
           permission_mode: mapSessionModeToPermissionMode(liveSessionMode),
         });
+        console.log('[TOKENICODE:session] started successfully', { sessionId: session.session_id, pid: session.pid, cli: session.cli_path });
 
         // Store both: session_id for tracking, stdinId (preGeneratedId) for stdin communication
         setSessionMeta({ sessionId: session.session_id, stdinId: preGeneratedId, envFingerprint: envFingerprint(), spawnedModel: resolveModelForProvider(selectedModel) });
@@ -1326,8 +1385,8 @@ export function InputBar() {
             onChange={handleFileSelect}
           />
 
-          {/* Mode selector */}
-          <ModeSelector disabled={isRunning} />
+          {/* Mode selector — hidden, use /ask /plan /code /bypass slash commands */}
+          {/* <ModeSelector disabled={isRunning} /> */}
 
           {/* Think toggle */}
           <ThinkLevelSelector disabled={isRunning} />

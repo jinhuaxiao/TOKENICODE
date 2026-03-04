@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useProviderStore, type ApiProvider, type ModelMapping } from '../../stores/providerStore';
-import { bridge } from '../../lib/tauri-bridge';
+import { bridge, type ConnectionTestResult } from '../../lib/tauri-bridge';
 import { useT } from '../../lib/i18n';
 
 const MODEL_TIERS: { tier: 'opus' | 'sonnet' | 'haiku'; labelKey: string; placeholderKey: string }[] = [
@@ -55,8 +55,9 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
   const [mappings, setMappings] = useState<ModelMapping[]>(provider.modelMappings);
   const [extraEnv, setExtraEnv] = useState<Record<string, string>>(provider.extra_env || {});
   const [testStatus, _setTestStatus] = useState<TestStatus>('idle');
-  const [testError, setTestError] = useState('');
+  const [_testError, setTestError] = useState('');
   const [testTimeMs, setTestTimeMs] = useState<number | null>(null);
+  const [testResult, setTestResult] = useState<ConnectionTestResult | null>(null);
 
   const setTestStatus = useCallback((status: TestStatus) => {
     _setTestStatus(status);
@@ -120,6 +121,7 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
     setTestStatus('testing');
     setTestError('');
     setTestTimeMs(null);
+    setTestResult(null);
     try {
       const testModel = mappings.find((m) => m.providerModel)?.providerModel || '';
       if (!testModel) {
@@ -135,22 +137,21 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
       const start = Date.now();
       const result = await bridge.testProviderConnection(baseUrl, apiFormat, apiKey, testModel);
       const elapsed = Date.now() - start;
-      if (result.startsWith('OK')) {
+      setTestResult(result);
+      setTestTimeMs(elapsed);
+      if (result.connectivity.ok && result.auth.ok && result.model.ok) {
         setTestStatus('success');
-        setTestTimeMs(elapsed);
+      } else if (!result.auth.ok && result.connectivity.ok) {
+        setTestStatus('auth_error');
+        setTestError(result.auth.message);
       } else {
         setTestStatus('failed');
-        setTestError(result);
+        const failedStep = !result.connectivity.ok ? result.connectivity : result.model;
+        setTestError(failedStep.message);
       }
     } catch (e) {
-      const err = String(e);
-      if (err.includes('AUTH_ERROR')) {
-        setTestStatus('auth_error');
-        setTestError(err.replace('AUTH_ERROR: ', ''));
-      } else {
-        setTestStatus('failed');
-        setTestError(err);
-      }
+      setTestStatus('failed');
+      setTestError(String(e));
     }
   }, [baseUrl, apiFormat, apiKey, mappings, t]);
 
@@ -184,46 +185,71 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
       </div>
 
       {/* Test Connection — at the top */}
-      <div className="flex items-center gap-2">
-        <button
-          onClick={handleTestConnection}
-          disabled={!baseUrl || testStatus === 'testing'}
-          className={`px-3 py-2 rounded-lg text-[13px] font-medium transition-smooth
-            border border-border-subtle
-            ${testStatus === 'success'
-              ? 'bg-green-500/10 text-green-500 border-green-500/30'
-              : testStatus === 'failed' || testStatus === 'auth_error'
-                ? 'bg-red-500/10 text-red-500 border-red-500/30'
-                : 'text-text-muted hover:bg-bg-secondary'
-            }
-            disabled:opacity-40 disabled:cursor-not-allowed`}
-        >
-          {testStatus === 'testing' ? (
-            <span className="flex items-center gap-1.5">
-              <span className="w-2.5 h-2.5 border-[1.5px] border-accent/30
-                border-t-accent rounded-full animate-spin" />
-              {t('provider.testing')}
-            </span>
-          ) : testStatus === 'success' ? (
-            <span className="flex items-center gap-1">
-              <svg width="10" height="10" viewBox="0 0 16 16" fill="none"
-                stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                <path d="M3 8l4 4 6-7" />
-              </svg>
-              {testTimeMs != null ? `${testTimeMs}ms` : t('provider.testSuccess')}
-            </span>
-          ) : testStatus === 'auth_error' ? (
-            t('provider.testAuthError')
-          ) : testStatus === 'failed' ? (
-            t('provider.testFailed')
-          ) : (
-            t('provider.testConnection')
+      <div className="space-y-1.5">
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleTestConnection}
+            disabled={!baseUrl || testStatus === 'testing'}
+            className={`px-3 py-2 rounded-lg text-[13px] font-medium transition-smooth
+              border border-border-subtle
+              ${testStatus === 'success'
+                ? 'bg-green-500/10 text-green-500 border-green-500/30'
+                : testStatus === 'failed' || testStatus === 'auth_error'
+                  ? 'bg-red-500/10 text-red-500 border-red-500/30'
+                  : 'text-text-muted hover:bg-bg-secondary'
+              }
+              disabled:opacity-40 disabled:cursor-not-allowed`}
+          >
+            {testStatus === 'testing' ? (
+              <span className="flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 border-[1.5px] border-accent/30
+                  border-t-accent rounded-full animate-spin" />
+                {t('provider.testing')}
+              </span>
+            ) : (
+              t('provider.testConnection')
+            )}
+          </button>
+          {testTimeMs != null && testStatus !== 'testing' && (
+            <span className="text-xs text-text-tertiary">{testTimeMs}ms</span>
           )}
-        </button>
-        {testError && (testStatus === 'failed' || testStatus === 'auth_error') && (
-          <span className="text-xs text-red-400 truncate flex-1" title={testError}>
-            {testError}
-          </span>
+        </div>
+        {testResult && (
+          <div className="space-y-0.5 text-xs">
+            {([
+              { key: 'connectivity' as const, label: t('provider.testConnectivity') },
+              { key: 'auth' as const, label: t('provider.testAuth') },
+              { key: 'model' as const, label: t('provider.testModel') },
+            ]).map(({ key, label }) => {
+              const step = testResult[key];
+              const isSkipped = step.message === 'Skipped';
+              return (
+                <div key={key} className="flex items-center gap-1.5">
+                  {step.ok ? (
+                    <svg width="10" height="10" viewBox="0 0 16 16" fill="none"
+                      stroke="rgb(34 197 94)" strokeWidth="2" strokeLinecap="round">
+                      <path d="M3 8l4 4 6-7" />
+                    </svg>
+                  ) : isSkipped ? (
+                    <span className="w-2.5 h-2.5 rounded-full bg-text-tertiary/30" />
+                  ) : (
+                    <svg width="10" height="10" viewBox="0 0 16 16" fill="none"
+                      stroke="rgb(239 68 68)" strokeWidth="2" strokeLinecap="round">
+                      <path d="M4 4l8 8M12 4l-8 8" />
+                    </svg>
+                  )}
+                  <span className={step.ok ? 'text-green-500' : isSkipped ? 'text-text-tertiary' : 'text-red-400'}>
+                    {label}
+                  </span>
+                  {!step.ok && !isSkipped && (
+                    <span className="text-red-400/70 truncate flex-1" title={step.message}>
+                      — {step.message}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         )}
       </div>
 

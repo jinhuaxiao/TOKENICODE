@@ -10,6 +10,7 @@ import { PlanReviewCard } from './PlanReviewCard';
 import { PermissionCard } from './PermissionCard';
 import { QuestionCard } from './QuestionCard';
 import { AiAvatar } from '../shared/AiAvatar';
+import { UserAvatar } from '../shared/UserAvatar';
 
 interface Props {
   message: ChatMessage;
@@ -137,7 +138,7 @@ function UserMsg({ message }: Props) {
   }, [content]);
 
   return (
-    <div className="flex justify-end group/user relative">
+    <div className="flex justify-end gap-2.5 group/user relative">
       {/* Copy button — visible on hover */}
       <button
         onClick={handleCopy}
@@ -149,7 +150,7 @@ function UserMsg({ message }: Props) {
       >
         {copied ? t('msg.copied') : t('msg.copyText')}
       </button>
-      <div className="max-w-[80%] px-3.5 py-2.5 rounded-2xl rounded-br-md
+      <div className="max-w-[75%] px-3.5 py-2.5 rounded-2xl rounded-br-md
         bg-bg-user-msg text-text-inverse
         text-sm leading-relaxed shadow-md whitespace-pre-wrap">
         {renderUserContent(displayContent)}
@@ -201,6 +202,7 @@ function UserMsg({ message }: Props) {
           </div>
         )}
       </div>
+      <UserAvatar size="w-8 h-8 text-xs" className="mt-0.5" />
     </div>
   );
 }

@@ -143,21 +143,19 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
       const result = await bridge.testProviderConnection(p.baseUrl, p.apiFormat, p.apiKey, testModel);
       const elapsed = Date.now() - start;
 
-      if (result.startsWith('OK')) {
+      if (result.connectivity.ok && result.auth.ok && result.model.ok) {
         setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'success' }));
         setCardTestTimes((prev) => ({ ...prev, [providerId]: elapsed }));
-      } else {
-        setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'failed' }));
-      }
-    } catch (e) {
-      const err = String(e);
-      if (err.includes('AUTH_ERROR')) {
+      } else if (!result.auth.ok && result.connectivity.ok) {
         setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'auth_error' }));
       } else {
         setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'failed' }));
       }
+    } catch (e) {
+      setCardTestStatuses((prev) => ({ ...prev, [providerId]: 'failed' }));
     }
   }, []);
+
 
   /** Export from card */
   const handleCardExport = useCallback(async (providerId: string) => {
@@ -207,17 +205,20 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
       {isExpanded && (
         <div className="space-y-3 ml-0">
           {/* Inherit system config option */}
-          <button
-            onClick={() => setActive(null)}
-            className={`w-full text-left px-3 py-2 rounded-lg text-[13px] transition-smooth
-              ${!activeProviderId
-                ? 'bg-accent/10 text-accent border border-accent/30'
-                : 'text-text-muted hover:bg-bg-secondary border border-border-subtle'
-              }`}
+          <div className={`rounded-lg text-[13px] transition-smooth border
+            ${!activeProviderId
+              ? 'bg-accent/10 border-accent/30'
+              : 'border-border-subtle hover:bg-bg-secondary'
+            }`}
           >
-            {t('provider.inherit')}
-            <span className="text-xs text-text-tertiary ml-2">{t('provider.inheritDesc')}</span>
-          </button>
+            <button
+              onClick={() => setActive(null)}
+              className={`text-left w-full px-3 py-2 ${!activeProviderId ? 'text-accent' : 'text-text-muted'}`}
+            >
+              {t('provider.inherit')}
+              <span className="text-xs text-text-tertiary ml-2">{t('provider.inheritDesc')}</span>
+            </button>
+          </div>
 
           {/* Provider cards + inline forms */}
           <div className="space-y-1.5">

@@ -391,7 +391,7 @@ function TreeNode({
         )}
         {!node.is_dir && <span className="w-2.5" />}
         <FileIcon name={node.name} isDir={node.is_dir} size={14}
-          className="flex-shrink-0" />
+          className={`flex-shrink-0 ${node.is_dir ? 'text-accent/70 dark:text-accent' : ''}`} />
         {renamingPath === node.path ? (
           <input
             autoFocus

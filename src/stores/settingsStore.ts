@@ -63,6 +63,10 @@ interface SettingsState {
   lastSeenVersion: string;
   /** Custom AI avatar image (data URL or empty string for default </> icon) */
   aiAvatarUrl: string;
+  /** Custom user avatar image (data URL or empty string for default initials) */
+  userAvatarUrl: string;
+  /** User display name shown next to messages */
+  userDisplayName: string;
 
   toggleTheme: () => void;
   setTheme: (theme: Theme) => void;
@@ -91,6 +95,8 @@ interface SettingsState {
   setUpdateDownloaded: (downloaded: boolean) => void;
   setLastSeenVersion: (version: string) => void;
   setAiAvatarUrl: (url: string) => void;
+  setUserAvatarUrl: (url: string) => void;
+  setUserDisplayName: (name: string) => void;
 }
 
 // --- Theme cycle order ---
@@ -128,6 +134,8 @@ export const useSettingsStore = create<SettingsState>()(
       updateDownloaded: false,
       lastSeenVersion: '',
       aiAvatarUrl: '',
+      userAvatarUrl: '',
+      userDisplayName: '',
 
       toggleTheme: () =>
         set((state) => ({ theme: nextTheme(state.theme) })),
@@ -211,6 +219,12 @@ export const useSettingsStore = create<SettingsState>()(
 
       setAiAvatarUrl: (url) =>
         set(() => ({ aiAvatarUrl: url })),
+
+      setUserAvatarUrl: (url) =>
+        set(() => ({ userAvatarUrl: url })),
+
+      setUserDisplayName: (name) =>
+        set(() => ({ userDisplayName: name.slice(0, 20) })),
     }),
     {
       name: 'tokenicode-settings',
@@ -266,6 +280,8 @@ export const useSettingsStore = create<SettingsState>()(
         updateVersion: state.updateVersion,
         lastSeenVersion: state.lastSeenVersion,
         aiAvatarUrl: state.aiAvatarUrl,
+        userAvatarUrl: state.userAvatarUrl,
+        userDisplayName: state.userDisplayName,
       }),
     },
   ),

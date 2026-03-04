@@ -173,46 +173,7 @@ fn find_git_bash() -> Option<String> {
 }
 
 fn find_claude_binary() -> Option<String> {
-    // On Windows, prefer npm-global/bin first — .cmd shims are more reliable than
-    // GCS standalone binaries which may be incompatible with some Windows versions.
-    #[cfg(target_os = "windows")]
-    if let Some(npm_bin) = get_npm_global_bin() {
-        // Only search for Windows-executable formats; the extensionless `claude`
-        // is a JavaScript script and causes error 193 on Windows.
-        for name in &["claude.cmd", "claude.exe"] {
-            let path = npm_bin.join(name);
-            if is_valid_executable(&path) {
-                return Some(path.to_string_lossy().to_string());
-            }
-        }
-    }
-
-    // 0. Check app-local download directory (our own downloaded CLI)
-    if let Some(cli_dir) = cli_download_dir() {
-        #[cfg(target_os = "windows")]
-        let bin_name = "claude.exe";
-        #[cfg(not(target_os = "windows"))]
-        let bin_name = "claude";
-        let path = cli_dir.join(bin_name);
-        if path.exists() && is_valid_executable(&path) {
-            return Some(path.to_string_lossy().to_string());
-        }
-    }
-
-    // 0b. Check npm-global/bin (installed via local npm --prefix)
-    // On Windows this was already checked above; on other platforms check here.
-    #[cfg(not(target_os = "windows"))]
-    if let Some(npm_bin) = get_npm_global_bin() {
-        let names = &["claude"];
-        for name in names {
-            let path = npm_bin.join(name);
-            if is_valid_executable(&path) {
-                return Some(path.to_string_lossy().to_string());
-            }
-        }
-    }
-
-    // 1. Check if `claude` is already on the system PATH
+    // 1. Check if `claude` is already on the system PATH (highest priority)
     #[cfg(target_os = "windows")]
     {
         // Windows: use `where` via cmd with CREATE_NO_WINDOW to avoid flashing console.
@@ -344,6 +305,38 @@ fn find_claude_binary() -> Option<String> {
         ] {
             if is_valid_executable(std::path::Path::new(candidate)) {
                 return Some(candidate.to_string());
+            }
+        }
+    }
+
+    // 5. App-local and npm-global (lowest priority — fallback for self-deployed CLI)
+    #[cfg(target_os = "windows")]
+    if let Some(npm_bin) = get_npm_global_bin() {
+        for name in &["claude.cmd", "claude.exe"] {
+            let path = npm_bin.join(name);
+            if is_valid_executable(&path) {
+                return Some(path.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    if let Some(cli_dir) = cli_download_dir() {
+        #[cfg(target_os = "windows")]
+        let bin_name = "claude.exe";
+        #[cfg(not(target_os = "windows"))]
+        let bin_name = "claude";
+        let path = cli_dir.join(bin_name);
+        if path.exists() && is_valid_executable(&path) {
+            return Some(path.to_string_lossy().to_string());
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    if let Some(npm_bin) = get_npm_global_bin() {
+        for name in &["claude"] {
+            let path = npm_bin.join(name);
+            if is_valid_executable(&path) {
+                return Some(path.to_string_lossy().to_string());
             }
         }
     }
@@ -854,58 +847,160 @@ fn save_providers(data: ProvidersFile) -> Result<(), String> {
     Ok(())
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StepResult {
+    ok: bool,
+    message: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ConnectionTestResult {
+    connectivity: StepResult,
+    auth: StepResult,
+    model: StepResult,
+}
+
 #[tauri::command]
-async fn test_provider_connection(base_url: String, api_format: String, api_key: String, model: String) -> Result<String, String> {
-    // Smart proxy: probes proxy port first, falls back to direct if VPN is off
+async fn test_provider_connection(base_url: String, api_format: String, api_key: String, model: String) -> Result<ConnectionTestResult, String> {
     let client = build_smart_http_client(
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(30),
     ).await;
 
-    let (_url, resp_result) = if api_format == "openai" {
-        let url = format!("{}/chat/completions", base_url.trim_end_matches('/'));
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "hi"}]
-        });
-        let r = client.post(&url)
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(15))
-            .send()
-            .await;
-        (url, r)
+    let base = base_url.trim_end_matches('/');
+    let skipped = StepResult { ok: false, message: "Skipped".to_string() };
+
+    // Step 1: Connectivity — HEAD request to base URL without auth
+    let connectivity_url = if api_format == "openai" {
+        format!("{}/chat/completions", base)
     } else {
-        let url = format!("{}/v1/messages", base_url.trim_end_matches('/'));
-        let body = serde_json::json!({
-            "model": model,
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "hi"}]
-        });
-        let r = client.post(&url)
-            .header("x-api-key", &api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(15))
-            .send()
-            .await;
-        (url, r)
+        format!("{}/v1/messages", base)
+    };
+    let conn_result = client.head(&connectivity_url)
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+    let connectivity = match conn_result {
+        Ok(_resp) => StepResult { ok: true, message: "Reachable".to_string() },
+        Err(e) => {
+            return Ok(ConnectionTestResult {
+                connectivity: StepResult { ok: false, message: format!("Unreachable: {}", e) },
+                auth: skipped.clone(),
+                model: skipped,
+            });
+        }
     };
 
-    let resp = resp_result.map_err(|e| format!("NETWORK_ERROR: {}", e))?;
-    let status = resp.status().as_u16();
-    let text = resp.text().await.unwrap_or_default();
-
-    if status >= 200 && status < 300 {
-        Ok(format!("OK ({})", status))
-    } else if status == 401 {
-        Err(format!("AUTH_ERROR: HTTP {} — {}", status, text.chars().take(500).collect::<String>()))
+    // Step 2: Auth — minimal request with API key, dummy model name
+    let auth_body = if api_format == "openai" {
+        serde_json::json!({
+            "model": "test-auth-probe",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}]
+        })
     } else {
-        Ok(format!("OK ({})", status))
+        serde_json::json!({
+            "model": "test-auth-probe",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}]
+        })
+    };
+    let mut auth_req = client.post(&connectivity_url)
+        .header("Content-Type", "application/json")
+        .json(&auth_body)
+        .timeout(std::time::Duration::from_secs(10));
+    if api_format == "openai" {
+        auth_req = auth_req.header("Authorization", format!("Bearer {}", api_key));
+    } else {
+        auth_req = auth_req
+            .header("x-api-key", &api_key)
+            .header("anthropic-version", "2023-06-01");
     }
+    let auth_resp = auth_req.send().await;
+    let auth = match auth_resp {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            if status == 401 || status == 403 {
+                let text = resp.text().await.unwrap_or_default();
+                return Ok(ConnectionTestResult {
+                    connectivity,
+                    auth: StepResult { ok: false, message: format!("HTTP {} — {}", status, text.chars().take(200).collect::<String>()) },
+                    model: skipped,
+                });
+            }
+            // Any other status (including 400/404 for bad model name) means auth is OK
+            StepResult { ok: true, message: format!("Authenticated (HTTP {})", status) }
+        }
+        Err(e) => {
+            return Ok(ConnectionTestResult {
+                connectivity,
+                auth: StepResult { ok: false, message: format!("Request failed: {}", e) },
+                model: skipped,
+            });
+        }
+    };
+
+    // Step 3: Model — actual request with real model name
+    let model_body = if api_format == "openai" {
+        serde_json::json!({
+            "model": model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}]
+        })
+    } else {
+        serde_json::json!({
+            "model": model,
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hi"}]
+        })
+    };
+    let mut model_req = client.post(&connectivity_url)
+        .header("Content-Type", "application/json")
+        .json(&model_body)
+        .timeout(std::time::Duration::from_secs(15));
+    if api_format == "openai" {
+        model_req = model_req.header("Authorization", format!("Bearer {}", api_key));
+    } else {
+        model_req = model_req
+            .header("x-api-key", &api_key)
+            .header("anthropic-version", "2023-06-01");
+    }
+    let model_resp = model_req.send().await;
+    let model_step = match model_resp {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            if status >= 200 && status < 300 {
+                StepResult { ok: true, message: format!("Model OK (HTTP {})", status) }
+            } else {
+                let text = resp.text().await.unwrap_or_default();
+                let text_lower = text.to_lowercase();
+                // HTTP 400 from proxies/gateways doesn't necessarily mean model is invalid.
+                // Only flag as model error if the response explicitly says so.
+                let is_model_error = (status == 404)
+                    || (text_lower.contains("model") && (
+                        text_lower.contains("not found")
+                        || text_lower.contains("not_found")
+                        || text_lower.contains("does not exist")
+                        || text_lower.contains("invalid model")
+                        || text_lower.contains("invalid_model")
+                    ));
+                if is_model_error {
+                    StepResult { ok: false, message: format!("HTTP {} — {}", status, text.chars().take(200).collect::<String>()) }
+                } else {
+                    // Request reached the server and was processed (auth passed, model accepted),
+                    // just the minimal test payload was rejected — model is valid.
+                    StepResult { ok: true, message: format!("Model accepted (HTTP {})", status) }
+                }
+            }
+        }
+        Err(e) => StepResult { ok: false, message: format!("Request failed: {}", e) },
+    };
+
+    Ok(ConnectionTestResult {
+        connectivity,
+        auth,
+        model: model_step,
+    })
 }
 
 /// Resolve provider env vars and CLI args from a provider_id.
@@ -948,13 +1043,6 @@ fn resolve_provider_env(provider_id: Option<&str>) -> Result<(HashMap<String, St
             }
         }
     }
-
-    // Remove inherited ANTHROPIC_* vars that we don't explicitly set
-    let inherited_removals: Vec<String> = std::env::vars()
-        .filter(|(k, _)| k.starts_with("ANTHROPIC_") && !env.contains_key(k))
-        .map(|(k, _)| k)
-        .collect();
-    keys_to_remove.extend(inherited_removals);
 
     // No extra CLI args needed — env vars set on the process take precedence.
     // Previously we used --setting-sources project,local to skip user settings,
@@ -1477,6 +1565,7 @@ async fn start_claude_session(
     Ok(SessionInfo {
         session_id: sid,
         pid,
+        cli_path: claude_bin.clone(),
     })
 }
 
@@ -3048,9 +3137,10 @@ async fn list_all_commands(cwd: Option<String>) -> Result<Vec<UnifiedCommand>, S
 
     // 1. Built-in commands: (name, description, has_args, execution)
     // execution: "ui" = handled in frontend, "cli" = run as separate CLI process, "session" = needs active CLI session
-    let builtins: [(&str, &str, bool, &str); 23] = [
+    let builtins: [(&str, &str, bool, &str); 24] = [
         ("/ask", "Ask a question without making changes", false, "ui"),
         ("/bug", "Report a bug with Claude Code", false, "ui"),
+        ("/bypass", "Switch to bypass mode (skip all permission prompts)", false, "ui"),
         ("/clear", "Clear conversation history", false, "ui"),
         ("/code", "Switch to code mode (default)", false, "ui"),
         ("/compact", "Compact conversation to reduce context", false, "session"),
@@ -3728,6 +3818,15 @@ async fn install_cli_via_npm(app: &AppHandle, china: bool) -> Result<(), String>
 /// 3. Install CLI via npm with region-appropriate registry mirrors
 #[tauri::command]
 async fn install_claude_cli(app: AppHandle) -> Result<(), String> {
+    // Skip installation if CLI already exists on system
+    if find_claude_binary().is_some() {
+        eprintln!("CLI already found on system, skipping installation");
+        let _ = app.emit("setup:download:progress", serde_json::json!({
+            "downloaded": 0, "total": 0, "percent": 100, "phase": "complete"
+        }));
+        return Ok(());
+    }
+
     // Phase 0: Detect network environment (used by all subsequent phases)
     let china = is_china_network().await;
 
@@ -3771,6 +3870,46 @@ async fn install_claude_cli(app: AppHandle) -> Result<(), String> {
     eprintln!("CLI installed via npm");
     finalize_cli_install_paths(&app);
     Ok(())
+}
+
+/// Inject a directory into the user's Unix shell profile PATH.
+/// Appends an export line to the first existing profile file (.zshrc, .bashrc, etc.).
+#[cfg(not(target_os = "windows"))]
+fn inject_unix_shell_path(dir: &str) {
+    let home = match dirs::home_dir() { Some(h) => h, None => return };
+    let export_line = format!("export PATH=\"{}:$PATH\"", dir);
+    let marker = "# Added by TOKENICODE";
+    let block = format!("\n{}\n{}\n", marker, export_line);
+
+    let profiles = [
+        home.join(".zshrc"),
+        home.join(".bashrc"),
+        home.join(".bash_profile"),
+        home.join(".profile"),
+    ];
+
+    // Check if already injected
+    for p in &profiles {
+        if let Ok(c) = std::fs::read_to_string(p) {
+            if c.contains(&export_line) { return; }
+        }
+    }
+
+    // Append to the first existing profile
+    for p in &profiles {
+        if p.exists() {
+            if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(p) {
+                use std::io::Write;
+                let _ = f.write_all(block.as_bytes());
+                eprintln!("Injected PATH into {}", p.display());
+                return;
+            }
+        }
+    }
+
+    // None exist — create ~/.profile
+    let _ = std::fs::write(home.join(".profile"), block);
+    eprintln!("Created ~/.profile with PATH injection");
 }
 
 /// Post-install: add relevant directories to Windows user PATH and emit completion.
@@ -3853,7 +3992,12 @@ fn finalize_cli_install_paths(app: &AppHandle) {
     }
 
     #[cfg(not(target_os = "windows"))]
-    let _ = app;
+    {
+        if let Some(npm_bin) = get_npm_global_bin() {
+            inject_unix_shell_path(&npm_bin.to_string_lossy());
+        }
+        let _ = app;
+    }
 
     let _ = app.emit("setup:download:progress", serde_json::json!({
         "downloaded": 0, "total": 0, "percent": 100, "phase": "complete"
@@ -4509,6 +4653,7 @@ async fn start_claude_login(app: AppHandle) -> Result<(), String> {
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthStatus {
     authenticated: bool,
+    unknown: bool,
 }
 
 /// Check whether the Claude CLI is authenticated by running a lightweight check.
@@ -4526,13 +4671,28 @@ async fn check_claude_auth() -> Result<AuthStatus, String> {
     if let Some(home) = dirs::home_dir() {
         let cred_path = home.join(".claude").join("credentials.json");
         if cred_path.exists() {
-            // Credentials file exists — assume authenticated
-            return Ok(AuthStatus { authenticated: true });
+            // Parse JSON and check for actual token fields
+            if let Ok(content) = std::fs::read_to_string(&cred_path) {
+                if let Ok(json) = serde_json::from_str::<Value>(&content) {
+                    let has_token = ["claudeAiOAuthToken", "accessToken", "token", "apiKey"]
+                        .iter()
+                        .any(|key| {
+                            json.get(key)
+                                .and_then(|v| v.as_str())
+                                .map(|s| !s.is_empty())
+                                .unwrap_or(false)
+                        });
+                    if has_token {
+                        return Ok(AuthStatus { authenticated: true, unknown: false });
+                    }
+                }
+                // JSON invalid or no token found — fall through to claude doctor
+            }
         }
         // Also check .claude.json (older format)
         let alt_path = std::path::Path::new(&home).join(".claude.json");
         if alt_path.exists() {
-            return Ok(AuthStatus { authenticated: true });
+            return Ok(AuthStatus { authenticated: true, unknown: false });
         }
     }
 
@@ -4563,12 +4723,13 @@ async fn check_claude_auth() -> Result<AuthStatus, String> {
 
             Ok(AuthStatus {
                 authenticated: output.status.success() && !has_auth_issue,
+                unknown: false,
             })
         }
         Ok(Err(e)) => Err(format!("Failed to run auth check: {}", e)),
         Err(_) => {
-            // Timeout — if CLI exists, assume authenticated (auth issues will surface at runtime)
-            Ok(AuthStatus { authenticated: true })
+            // Timeout — cannot determine auth status
+            Ok(AuthStatus { authenticated: false, unknown: true })
         }
     }
 }
@@ -4665,6 +4826,7 @@ async fn save_archived_sessions(data: Value) -> Result<(), String> {
 async fn generate_session_title(
     user_message: String,
     assistant_message: String,
+    provider_id: Option<String>,
 ) -> Result<String, String> {
     // Safe UTF-8 truncation (don't slice mid-character)
     fn safe_truncate(s: &str, max_bytes: usize) -> &str {
@@ -4684,6 +4846,24 @@ async fn generate_session_title(
         user_msg, asst_msg
     );
 
+    // Resolve model and env vars for provider
+    let (provider_env, provider_keys_to_remove, model_name) = if let Some(ref pid) = provider_id {
+        let (env, keys, _args) = resolve_provider_env(Some(pid))?;
+        // Find haiku tier mapping from provider
+        let providers_file = load_providers()?;
+        let provider = providers_file.providers.iter().find(|p| p.id == *pid);
+        let haiku_model = provider
+            .and_then(|p| p.model_mappings.iter()
+                .find(|m| m.tier == "haiku" && !m.provider_model.is_empty())
+                .map(|m| m.provider_model.clone()));
+        match haiku_model {
+            Some(m) => (env, keys, m),
+            None => return Err("SKIP: no haiku mapping for provider".to_string()),
+        }
+    } else {
+        (HashMap::new(), vec![], "claude-haiku-4-5-20251001".to_string())
+    };
+
     // Resolve claude binary
     let claude_bin = find_claude_binary()
         .ok_or_else(|| "Claude CLI not found".to_string())?;
@@ -4693,7 +4873,7 @@ async fn generate_session_title(
     // Spawn a one-shot CLI process: -p for single prompt, --output-format json for structured output
     let args = vec![
         "-p".to_string(), prompt,
-        "--model".to_string(), "claude-haiku-4-5-20251001".to_string(),
+        "--model".to_string(), model_name,
         "--output-format".to_string(), "json".to_string(),
         "--max-turns".to_string(), "1".to_string(),
         "--dangerously-skip-permissions".to_string(),
@@ -4707,12 +4887,20 @@ async fn generate_session_title(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
+    // Inject provider env vars
+    for (k, v) in &provider_env {
+        cmd.env(k, v);
+    }
+    for k in &provider_keys_to_remove {
+        cmd.env_remove(k);
+    }
+
     // Inject proxy env vars from login shell for GUI apps
     #[cfg(not(target_os = "windows"))]
     {
         let proxy_env = login_shell_proxy_env();
         for (k, v) in proxy_env {
-            if std::env::var(k).is_err() {
+            if std::env::var(k).is_err() && !provider_env.contains_key(k) {
                 cmd.env(k, v);
             }
         }

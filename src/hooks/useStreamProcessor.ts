@@ -13,12 +13,36 @@ import { useProviderStore } from '../stores/providerStore';
 // excessive React re-renders when the message list is large.
 let _pendingStreamText = '';
 let _pendingThinkingText = '';
+let _pendingStreamStdinId: string | undefined; // track which session owns the buffer
 let _streamFlushRaf = 0;
 
 function _scheduleStreamFlush() {
   if (_streamFlushRaf) return;
   _streamFlushRaf = requestAnimationFrame(() => {
     _streamFlushRaf = 0;
+
+    // Check if the buffer's owner session is still the active foreground tab.
+    // If the user switched tabs between buffer accumulation and rAF flush,
+    // route the buffered text to the background cache instead.
+    const ownerStdinId = _pendingStreamStdinId;
+    const ownerTab = ownerStdinId
+      ? useSessionStore.getState().getTabForStdin(ownerStdinId)
+      : undefined;
+    const activeTab = useSessionStore.getState().selectedSessionId;
+    const isStale = ownerTab && ownerTab !== activeTab;
+
+    if (isStale) {
+      // Route to background cache
+      if (_pendingStreamText) {
+        useChatStore.getState().updatePartialInCache(ownerTab, _pendingStreamText);
+        _pendingStreamText = '';
+      }
+      // Drop thinking text for background (no cache method for thinking)
+      _pendingThinkingText = '';
+      _pendingStreamStdinId = undefined;
+      return;
+    }
+
     const { updatePartialMessage, updatePartialThinking } = useChatStore.getState();
     if (_pendingStreamText) {
       updatePartialMessage(_pendingStreamText);
@@ -28,6 +52,7 @@ function _scheduleStreamFlush() {
       updatePartialThinking(_pendingThinkingText);
       _pendingThinkingText = '';
     }
+    _pendingStreamStdinId = undefined;
   });
 }
 
@@ -37,6 +62,24 @@ export function flushStreamBuffer() {
     cancelAnimationFrame(_streamFlushRaf);
     _streamFlushRaf = 0;
   }
+  if (!_pendingStreamText && !_pendingThinkingText) {
+    _pendingStreamStdinId = undefined;
+    return;
+  }
+  // Check if the buffer belongs to a background tab (user may have just switched)
+  const flushOwnerTab = _pendingStreamStdinId
+    ? useSessionStore.getState().getTabForStdin(_pendingStreamStdinId)
+    : undefined;
+  const flushActiveTab = useSessionStore.getState().selectedSessionId;
+  if (flushOwnerTab && flushOwnerTab !== flushActiveTab) {
+    if (_pendingStreamText) {
+      useChatStore.getState().updatePartialInCache(flushOwnerTab, _pendingStreamText);
+      _pendingStreamText = '';
+    }
+    _pendingThinkingText = '';
+    _pendingStreamStdinId = undefined;
+    return;
+  }
   if (_pendingStreamText) {
     useChatStore.getState().updatePartialMessage(_pendingStreamText);
     _pendingStreamText = '';
@@ -45,6 +88,7 @@ export function flushStreamBuffer() {
     useChatStore.getState().updatePartialThinking(_pendingThinkingText);
     _pendingThinkingText = '';
   }
+  _pendingStreamStdinId = undefined;
 }
 
 /**
@@ -86,6 +130,116 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
     const cache = useChatStore.getState();
 
     switch (msg.type) {
+      case 'tokenicode_permission_request': {
+        // ExitPlanMode: auto-approve in non-plan modes; add plan_review card in plan mode
+        if (msg.tool_name === 'ExitPlanMode') {
+          if (useSettingsStore.getState().sessionMode !== 'plan') {
+            const stdinId = msg.__stdinId;
+            if (stdinId) {
+              bridge.respondPermission(stdinId, msg.request_id, true, undefined, msg.tool_use_id, msg.input);
+            }
+            return;
+          }
+          const bgSnapshot = cache.sessionCache.get(tabId);
+          const bgExisting = bgSnapshot?.messages.find((m) => m.id === 'plan_review_current' && !m.resolved);
+          if (!bgExisting) {
+            let bgPlanContent = '';
+            if (bgSnapshot) {
+              for (let i = bgSnapshot.messages.length - 1; i >= 0; i--) {
+                if (bgSnapshot.messages[i].role === 'assistant' && bgSnapshot.messages[i].type === 'text' && bgSnapshot.messages[i].content) {
+                  bgPlanContent = bgSnapshot.messages[i].content;
+                  break;
+                }
+              }
+            }
+            cache.addMessageToCache(tabId, {
+              id: 'plan_review_current',
+              role: 'assistant', type: 'plan_review',
+              content: bgPlanContent, planContent: bgPlanContent,
+              resolved: false, timestamp: Date.now(),
+              permissionData: {
+                requestId: msg.request_id,
+                toolName: msg.tool_name,
+                input: msg.input,
+                toolUseId: msg.tool_use_id,
+              },
+            });
+          } else {
+            cache.updateMessageInCache(tabId, 'plan_review_current', {
+              permissionData: {
+                requestId: msg.request_id,
+                toolName: msg.tool_name,
+                input: msg.input,
+                toolUseId: msg.tool_use_id,
+              },
+            });
+          }
+          cache.setActivityInCache(tabId, { phase: 'awaiting' });
+          return;
+        }
+        // AskUserQuestion: add question card to cache
+        if (msg.tool_name === 'AskUserQuestion') {
+          const bgSnapshot = cache.sessionCache.get(tabId);
+          const questionId = msg.tool_use_id || 'ask_question_current';
+          const existing = bgSnapshot?.messages.find((m) => m.id === questionId && m.type === 'question')
+            || bgSnapshot?.messages.find((m) => m.type === 'question' && !m.resolved && m.toolName === 'AskUserQuestion');
+          if (existing) {
+            cache.updateMessageInCache(tabId, existing.id, {
+              permissionData: {
+                requestId: msg.request_id,
+                toolName: msg.tool_name,
+                input: msg.input,
+                toolUseId: msg.tool_use_id,
+              },
+              toolInput: msg.input,
+            });
+            return;
+          }
+          const questions = msg.input?.questions;
+          cache.addMessageToCache(tabId, {
+            id: questionId,
+            role: 'assistant', type: 'question',
+            content: '', toolName: 'AskUserQuestion',
+            toolInput: msg.input,
+            questions: Array.isArray(questions) ? questions : [],
+            resolved: false, timestamp: Date.now(),
+            permissionData: {
+              requestId: msg.request_id,
+              toolName: msg.tool_name,
+              input: msg.input,
+              toolUseId: msg.tool_use_id,
+            },
+          });
+          cache.setActivityInCache(tabId, { phase: 'awaiting' });
+          return;
+        }
+        // Regular permission: add permission card to cache
+        const bgSnapshot = cache.sessionCache.get(tabId);
+        const existingPerm = bgSnapshot?.messages.find(
+          (m) => m.type === 'permission'
+            && m.permissionData?.requestId === msg.request_id
+            && m.interactionState !== 'failed'
+        );
+        if (existingPerm) return;
+        cache.addMessageToCache(tabId, {
+          id: generateMessageId(),
+          role: 'assistant', type: 'permission',
+          content: msg.description || `${msg.tool_name} wants to execute`,
+          permissionTool: msg.tool_name,
+          permissionDescription: msg.description || '',
+          timestamp: Date.now(),
+          interactionState: 'pending',
+          permissionData: {
+            requestId: msg.request_id,
+            toolName: msg.tool_name,
+            input: msg.input,
+            description: msg.description,
+            toolUseId: msg.tool_use_id,
+          },
+        });
+        cache.setActivityInCache(tabId, { phase: 'awaiting' });
+        break;
+      }
       case 'stream_event': {
         const evt = msg.event;
         if (!evt) break;
@@ -349,13 +503,16 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             if (bgUserMsgs.length >= 3 && bgAssistantMsgs.length >= 3) {
               const userMsg = bgUserMsgs.map((m) => m.content).join('\n').slice(0, 500);
               const assistantMsg = bgAssistantMsgs.map((m) => m.content).join('\n').slice(0, 500);
-              bridge.generateSessionTitle(userMsg, assistantMsg)
+              bridge.generateSessionTitle(userMsg, assistantMsg, useProviderStore.getState().activeProviderId || undefined)
                 .then((title) => {
                   if (title) {
                     useSessionStore.getState().setCustomPreview(tabId, title);
                   }
                 })
-                .catch(() => {});
+                .catch((e) => {
+                  // Silently ignore SKIP errors (e.g. no haiku mapping for provider)
+                  if (!String(e).includes('SKIP:')) console.warn('Title gen failed:', e);
+                });
             }
           }
         }
@@ -400,14 +557,37 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
 
     try { // P1-4: error boundary — prevent uncaught exceptions from crashing the stream pipeline
 
-    // Diagnostic: log unrecognized message types that would be silently dropped
+    // Diagnostic: log first message and unrecognized types
     const KNOWN_TYPES = new Set([
       'tokenicode_permission_request', 'stream_event', 'system', 'assistant',
       'user', 'human', 'tool_result', 'tool_use_summary', 'result', 'process_exit',
       'content_block_delta',
     ]);
+    if (msg.type === 'system' || msg.type === 'process_exit') {
+      console.log('[TOKENICODE:stream]', msg.type, msg.subtype || '', msg.__stdinId || '');
+    }
     if (!KNOWN_TYPES.has(msg.type)) {
       console.warn('[TOKENICODE:stream] unhandled message type:', msg.type, msg);
+    }
+
+    // --- Background routing: detect if this stream belongs to a non-active tab ---
+    // MUST run before tokenicode_permission_request and all other handlers
+    // to prevent messages from background sessions leaking into the active tab.
+    const msgStdinId = msg.__stdinId;
+    const ownerTabId = msgStdinId
+      ? useSessionStore.getState().getTabForStdin(msgStdinId)
+      : undefined;
+    const activeTabId = useSessionStore.getState().selectedSessionId;
+    const isBackground = ownerTabId && ownerTabId !== activeTabId;
+
+    // If stream belongs to a background tab, route key events to cache and return
+    if (isBackground) {
+      // Diagnostic: log background routing for non-trivial message types
+      if (msg.type !== 'stream_event') {
+        console.log('[TOKENICODE:route] background:', msg.type, 'owner:', ownerTabId, 'active:', activeTabId);
+      }
+      handleBackgroundStreamMessage(msg, ownerTabId);
+      return;
     }
 
     // --- SDK Permission Request (routed through stream channel for reliability) ---
@@ -539,25 +719,6 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
       return;
     }
 
-    // --- Background routing: detect if this stream belongs to a non-active tab ---
-    // Each stream message is tagged with __stdinId by the listener closure.
-    const msgStdinId = msg.__stdinId;
-    const ownerTabId = msgStdinId
-      ? useSessionStore.getState().getTabForStdin(msgStdinId)
-      : undefined;
-    const activeTabId = useSessionStore.getState().selectedSessionId;
-    const isBackground = ownerTabId && ownerTabId !== activeTabId;
-
-    // If stream belongs to a background tab, route key events to cache and return
-    if (isBackground) {
-      // Diagnostic: log background routing for non-trivial message types
-      if (msg.type !== 'stream_event') {
-        console.log('[TOKENICODE:route] background:', msg.type, 'owner:', ownerTabId, 'active:', activeTabId);
-      }
-      handleBackgroundStreamMessage(msg, ownerTabId);
-      return;
-    }
-
     const { addMessage,
       setSessionStatus, setSessionMeta, setActivityStatus } = useChatStore.getState();
     const agentActions = useAgentStore.getState();
@@ -617,6 +778,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           if (text) {
             // Buffer text and flush via rAF to avoid excessive re-renders
             _pendingStreamText += text;
+            _pendingStreamStdinId = msgStdinId;
             _scheduleStreamFlush();
             agentActions.updatePhase(agentId, 'writing');
           }
@@ -624,6 +786,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const thinkingText = evt.delta.thinking || '';
           if (thinkingText) {
             _pendingThinkingText += thinkingText;
+            _pendingStreamStdinId = msgStdinId;
             _scheduleStreamFlush();
             agentActions.updatePhase(agentId, 'thinking');
           } else {
@@ -1325,13 +1488,15 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 if (assistantTextMsgs.length >= 3) {
                   const userMsg = userTextMsgs.map((m) => m.content).join('\n').slice(0, 500);
                   const assistantMsg = assistantTextMsgs.map((m) => m.content).join('\n').slice(0, 500);
-                  bridge.generateSessionTitle(userMsg, assistantMsg)
+                  bridge.generateSessionTitle(userMsg, assistantMsg, useProviderStore.getState().activeProviderId || undefined)
                     .then((title) => {
                       if (title) {
                         useSessionStore.getState().setCustomPreview(sessionId, title);
                       }
                     })
-                    .catch(() => {});
+                    .catch((e) => {
+                      if (!String(e).includes('SKIP:')) console.warn('Title gen failed:', e);
+                    });
                 }
               }
             }
@@ -1417,6 +1582,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
       case 'process_exit': {
         // The CLI process has exited — clear the stdin handle but keep sessionId for resume
         clearPartial();
+        console.log('[TOKENICODE:session] process_exit received', { stdinId: msg.__stdinId });
 
         // If the session was running and no assistant messages were received,
         // the process failed at startup. Show the last stderr error to the user.
@@ -1425,22 +1591,36 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const hasAssistantReply = exitMsgs.some(
             (m) => m.role === 'assistant' && (m.type === 'text' || m.type === 'tool_use'),
           );
-          if (!hasAssistantReply && lastStderrRef.current) {
-            // Detect macOS TCC permission errors and provide actionable guidance
-            const stderr = lastStderrRef.current;
-            const isTccError = /unexpected|operation not permitted|permission denied/i.test(stderr);
-            const cwd = useSettingsStore.getState().workingDirectory || '';
-            const isProtectedDir = /\/(Desktop|Downloads|Documents)\//i.test(cwd);
-            const hint = isTccError && isProtectedDir
-              ? '\n\n此目录可能受 macOS 隐私保护限制。请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中授权，或选择其他目录。'
-              : '';
-            addMessage({
-              id: generateMessageId(),
-              role: 'system',
-              type: 'text',
-              content: `CLI error: ${stderr}${hint}`,
-              timestamp: Date.now(),
-            });
+          if (!hasAssistantReply) {
+            if (lastStderrRef.current) {
+              // Detect macOS TCC permission errors and provide actionable guidance
+              const stderr = lastStderrRef.current;
+              const isTccError = /unexpected|operation not permitted|permission denied/i.test(stderr);
+              const cwd = useSettingsStore.getState().workingDirectory || '';
+              const isProtectedDir = /\/(Desktop|Downloads|Documents)\//i.test(cwd);
+              const hint = isTccError && isProtectedDir
+                ? '\n\n此目录可能受 macOS 隐私保护限制。请在「系统设置 → 隐私与安全性 → 完全磁盘访问权限」中授权，或选择其他目录。'
+                : '';
+              addMessage({
+                id: generateMessageId(),
+                role: 'system',
+                type: 'text',
+                content: `CLI error: ${stderr}${hint}`,
+                timestamp: Date.now(),
+              });
+            } else {
+              // No stderr captured — CLI exited silently. Show a generic error
+              // so the user knows something went wrong (previously this was silent).
+              addMessage({
+                id: generateMessageId(),
+                role: 'system',
+                type: 'text',
+                content: 'CLI process exited unexpectedly without producing output. '
+                  + 'Please check that Claude CLI is installed correctly (Settings → CLI) '
+                  + 'and that your API provider is configured.',
+                timestamp: Date.now(),
+              });
+            }
           }
         }
 
@@ -1468,6 +1648,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
           const text = msg.delta?.text || '';
           if (text) {
             _pendingStreamText += text;
+            _pendingStreamStdinId = msgStdinId;
             _scheduleStreamFlush();
           }
         }

@@ -26,6 +26,7 @@ export interface StartSessionParams {
 export interface SessionInfo {
   session_id: string;
   pid: number;
+  cli_path: string;
 }
 
 export interface SessionListItem {
@@ -88,6 +89,18 @@ export interface CliStatus {
 
 export interface AuthStatus {
   authenticated: boolean;
+  unknown?: boolean;
+}
+
+export interface StepResult {
+  ok: boolean;
+  message: string;
+}
+
+export interface ConnectionTestResult {
+  connectivity: StepResult;
+  auth: StepResult;
+  model: StepResult;
 }
 
 export interface SetupOutputEvent {
@@ -335,8 +348,8 @@ export const bridge = {
     invoke<void>('save_archived_sessions', { data }).catch(() => {}),
 
   // AI title generation (spawns separate CLI process, no channel interference)
-  generateSessionTitle: (userMessage: string, assistantMessage: string) =>
-    invoke<string>('generate_session_title', { userMessage, assistantMessage }),
+  generateSessionTitle: (userMessage: string, assistantMessage: string, providerId?: string) =>
+    invoke<string>('generate_session_title', { userMessage, assistantMessage, providerId: providerId || null }),
 
   // --- Provider Management ---
 
@@ -347,7 +360,8 @@ export const bridge = {
     invoke<void>('save_providers', { data }),
 
   testProviderConnection: (baseUrl: string, apiFormat: string, apiKey: string, model: string) =>
-    invoke<string>('test_provider_connection', { baseUrl, apiFormat, apiKey, model }),
+    invoke<ConnectionTestResult>('test_provider_connection', { baseUrl, apiFormat, apiKey, model }),
+
 
   // --- SDK Control Protocol ---
 
