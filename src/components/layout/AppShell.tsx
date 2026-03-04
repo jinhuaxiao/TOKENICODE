@@ -25,11 +25,9 @@ const MAX_PREVIEW_WIDTH = 1200;
 export function AppShell({ sidebar, main, secondary }: AppShellProps) {
   const sidebarOpen = useSettingsStore((s) => s.sidebarOpen);
   const sidebarWidth = useSettingsStore((s) => s.sidebarWidth);
-  const setSidebarWidth = useSettingsStore((s) => s.setSidebarWidth);
   const toggleSidebar = useSettingsStore((s) => s.toggleSidebar);
   const secondaryPanelOpen = useSettingsStore((s) => s.secondaryPanelOpen);
   const secondaryPanelWidth = useSettingsStore((s) => s.secondaryPanelWidth);
-  const setSecondaryPanelWidth = useSettingsStore((s) => s.setSecondaryPanelWidth);
   const toggleSecondaryPanel = useSettingsStore((s) => s.toggleSecondaryPanel);
 
   /* File preview state — when a file is selected, we enter "preview mode" */
