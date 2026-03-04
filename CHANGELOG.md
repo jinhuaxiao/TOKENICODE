@@ -8,6 +8,14 @@ All notable changes to TOKENICODE will be documented in this file.
 
 ---
 
+## [0.8.3] - 2026-03-04
+
+### Added
+
+- **文件右键分享** — macOS 文件管理器右键菜单新增「分享...」（调用系统分享面板）和「分享到微信」（直接调用微信分享服务），分享面板出现在鼠标点击位置。
+
+---
+
 ## [0.8.2] - 2026-03-04
 
 ### Fixed

@@ -13,6 +13,18 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.8.3',
+    date: '2026-03-04',
+    highlights: {
+      zh: [
+        '文件右键新增「分享...」和「分享到微信」（macOS）',
+      ],
+      en: [
+        'Add "Share..." and "Share to WeChat" to file context menu (macOS)',
+      ],
+    },
+  },
+  {
     version: '0.8.2',
     date: '2026-03-04',
     highlights: {
