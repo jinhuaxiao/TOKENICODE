@@ -1,9 +1,15 @@
 import type { Locale } from '../stores/settingsStore';
 
+export interface ChangelogCategory {
+  label: Record<Locale, string>;
+  items: Record<Locale, string[]>;
+}
+
 export interface ChangelogEntry {
   version: string;
   date: string;
   highlights: Record<Locale, string[]>;
+  categories?: ChangelogCategory[];
 }
 
 /**
@@ -14,45 +20,62 @@ export interface ChangelogEntry {
 export const CHANGELOG: ChangelogEntry[] = [
   {
     version: '0.8.4',
-    date: '2026-03-04',
+    date: '2026-03-05',
     highlights: {
-      zh: [
-        'CLI 发现优先级修复 — 系统已安装的 CLI 优先于自部署版本，登录状态正确共享',
-        '第三方 API 模型拦截 — 未配置模型映射时阻止发送并提示，不再把原始模型名发给第三方报错',
-        '继承配置修复 — 不再意外清除系统环境变量，继承模式正常使用系统 API Key',
-        '连接测试三步走 — 分步检测连通性、Key 有效性、模型可用性，精准定位问题',
-        '标题生成适配第三方 — 使用 provider 映射的 haiku 模型生成标题，无映射时静默跳过',
-        '自部署 CLI 注入 shell PATH — macOS/Linux 安装后自动写入 ~/.zshrc 等，终端可直接用 claude',
-        '用户头像与昵称 — 设置中自定义头像和显示名，聊天气泡右侧展示',
-        '修复多窗口串消息 — 切换对话窗口后，后台会话的回复不再串到前台窗口',
-        '隐藏模式选择按钮 — 默认 Bypass 模式，高级用户可通过 /ask /plan /code /bypass 斜杠命令切换',
-      ],
-      en: [
-        'CLI discovery priority fix — System-installed CLI takes precedence over self-deployed, login state shared correctly',
-        'Third-party API model interception — Blocks send when model mapping is missing, prevents raw model name errors',
-        'Inherit config fix — No longer clears system env vars, inherited mode correctly uses system API Key',
-        'Three-step connection test — Separately checks connectivity, auth, and model availability for precise diagnostics',
-        'Title generation adapts to providers — Uses provider-mapped haiku model, silently skips when unmapped',
-        'Self-deployed CLI injects shell PATH — macOS/Linux auto-writes to ~/.zshrc etc., claude works from terminal',
-        'User avatar & display name — Customize in Settings, shown next to chat bubbles',
-        'Fix cross-tab message leaking — Background session responses no longer bleed into the active tab',
-        'Hide mode selector buttons — Defaults to Bypass mode, power users switch via /ask /plan /code /bypass commands',
-      ],
+      zh: [],
+      en: [],
     },
-  },
-  {
-    version: '0.8.3',
-    date: '2026-03-04',
-    highlights: {
-      zh: [
-        '文件右键新增「分享...」和「分享到微信」（macOS）',
-        '文件夹图标使用主题色，更容易区分文件和文件夹',
-      ],
-      en: [
-        'Add "Share..." and "Share to WeChat" to file context menu (macOS)',
-        'Folder icons now use accent color for better distinction',
-      ],
-    },
+    categories: [
+      {
+        label: { zh: '新功能', en: 'New' },
+        items: {
+          zh: [
+            '文件右键分享 — macOS 右键菜单新增「分享…」和「分享到微信」',
+            '用户头像与昵称 — 设置中自定义头像和显示名，聊天气泡右侧展示',
+            '自部署 CLI 注入 shell PATH — macOS/Linux 安装后自动写入 ~/.zshrc 等，终端可直接用 claude',
+          ],
+          en: [
+            'File sharing — "Share..." and "Share to WeChat" added to macOS file context menu',
+            'User avatar & display name — Customize in Settings, shown next to chat bubbles',
+            'Self-deployed CLI injects shell PATH — macOS/Linux auto-writes to ~/.zshrc etc., claude works from terminal',
+          ],
+        },
+      },
+      {
+        label: { zh: '修复', en: 'Fixed' },
+        items: {
+          zh: [
+            'CLI 发现优先级 — 系统已安装的 CLI 优先于自部署版本，登录状态正确共享',
+            '第三方 API 模型拦截 — 未配置模型映射时阻止发送并提示，不再把原始模型名发给第三方报错',
+            '继承配置修复 — 不再意外清除系统环境变量，继承模式正常使用系统 API Key',
+            '标题生成适配第三方 — 使用 provider 映射的 haiku 模型，无映射时静默跳过',
+            '多窗口串消息 — 切换对话窗口后，后台会话的回复不再串到前台窗口',
+          ],
+          en: [
+            'CLI discovery priority — System-installed CLI takes precedence over self-deployed, login state shared correctly',
+            'Third-party API model interception — Blocks send when model mapping is missing, prevents raw model name errors',
+            'Inherit config fix — No longer clears system env vars, inherited mode correctly uses system API Key',
+            'Title generation adapts to providers — Uses provider-mapped haiku model, silently skips when unmapped',
+            'Cross-tab message leaking — Background session responses no longer bleed into the active tab',
+          ],
+        },
+      },
+      {
+        label: { zh: '改进', en: 'Improved' },
+        items: {
+          zh: [
+            '连接测试三步走 — 分步检测连通性、Key 有效性、模型可用性，精准定位问题',
+            '文件夹图标主题色 — 更容易区分文件和文件夹',
+            '简化模式选择 — 默认 Bypass 模式，高级用户可通过 /ask /plan /code /bypass 切换',
+          ],
+          en: [
+            'Three-step connection test — Separately checks connectivity, auth, and model availability for precise diagnostics',
+            'Folder icons use accent color — Better distinction between files and folders',
+            'Simplified mode selection — Defaults to Bypass mode, power users switch via /ask /plan /code /bypass commands',
+          ],
+        },
+      },
+    ],
   },
   {
     version: '0.8.2',

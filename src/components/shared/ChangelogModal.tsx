@@ -1,6 +1,7 @@
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useT } from '../../lib/i18n';
 import { getChangelog } from '../../lib/changelog';
+import type { ChangelogCategory } from '../../lib/changelog';
 
 interface Props {
   version: string;
@@ -14,7 +15,7 @@ export function ChangelogModal({ version, onClose }: Props) {
 
   if (!entry) return null;
 
-  const items = entry.highlights[locale] || entry.highlights.en;
+  const hasCats = entry.categories && entry.categories.length > 0;
 
   return (
     <div
@@ -40,14 +41,38 @@ export function ChangelogModal({ version, onClose }: Props) {
 
         {/* Content */}
         <div className="px-6 pb-4 overflow-y-auto max-h-[calc(70vh-160px)]">
-          <ul className="space-y-2.5">
-            {items.map((item, i) => (
-              <li key={i} className="flex gap-2.5 text-[13px] text-text-secondary leading-relaxed">
-                <span className="text-accent mt-0.5 flex-shrink-0">•</span>
-                <span>{item}</span>
-              </li>
-            ))}
-          </ul>
+          {hasCats ? (
+            <div className="space-y-4">
+              {entry.categories!.map((cat: ChangelogCategory, ci: number) => {
+                const catItems = cat.items[locale] || cat.items.en;
+                const catLabel = cat.label[locale] || cat.label.en;
+                return (
+                  <div key={ci}>
+                    <h3 className="text-[12px] font-semibold text-text-tertiary uppercase tracking-wider mb-2">
+                      {catLabel}
+                    </h3>
+                    <ul className="space-y-2">
+                      {catItems.map((item: string, i: number) => (
+                        <li key={i} className="flex gap-2.5 text-[13px] text-text-secondary leading-relaxed">
+                          <span className="text-accent mt-0.5 flex-shrink-0">•</span>
+                          <span>{item}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <ul className="space-y-2.5">
+              {(entry.highlights[locale] || entry.highlights.en).map((item: string, i: number) => (
+                <li key={i} className="flex gap-2.5 text-[13px] text-text-secondary leading-relaxed">
+                  <span className="text-accent mt-0.5 flex-shrink-0">•</span>
+                  <span>{item}</span>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
 
         {/* Footer */}
