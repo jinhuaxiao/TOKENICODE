@@ -1,10 +1,22 @@
-import { useState, useRef, useEffect } from 'react';
-import { useSettingsStore, MODEL_OPTIONS } from '../../stores/settingsStore';
+import { useState, useRef, useEffect, useMemo } from 'react';
+import { useSettingsStore, MODEL_OPTIONS, type ModelId } from '../../stores/settingsStore';
 import { useChatStore, generateMessageId } from '../../stores/chatStore';
+import { useProviderStore } from '../../stores/providerStore';
+
+/** Tier mapping from ModelId to provider tier key */
+const TIER_MAP: Record<ModelId, 'opus' | 'sonnet' | 'haiku'> = {
+  'claude-opus-4-6': 'opus',
+  'claude-sonnet-4-6': 'sonnet',
+  'claude-haiku-4-5': 'haiku',
+};
 
 export function ModelSelector({ disabled = false }: { disabled?: boolean }) {
   const selectedModel = useSettingsStore((s) => s.selectedModel);
   const setSelectedModel = useSettingsStore((s) => s.setSelectedModel);
+  const activeProvider = useProviderStore((s) => {
+    if (!s.activeProviderId) return null;
+    return s.providers.find((p) => p.id === s.activeProviderId) ?? null;
+  });
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -20,7 +32,22 @@ export function ModelSelector({ disabled = false }: { disabled?: boolean }) {
     return () => document.removeEventListener('mousedown', handler);
   }, [open]);
 
-  const current = MODEL_OPTIONS.find((m) => m.id === selectedModel) || MODEL_OPTIONS[0];
+  // Build display options: show real model names when a provider with mappings is active
+  const displayOptions = useMemo(() => {
+    if (!activeProvider || activeProvider.modelMappings.length === 0) {
+      return MODEL_OPTIONS.map((m) => ({ ...m, mapped: false }));
+    }
+    return MODEL_OPTIONS.map((m) => {
+      const tier = TIER_MAP[m.id];
+      const mapping = activeProvider.modelMappings.find((mm) => mm.tier === tier);
+      if (mapping?.providerModel) {
+        return { ...m, label: mapping.providerModel, short: mapping.providerModel, mapped: true };
+      }
+      return { ...m, mapped: false };
+    });
+  }, [activeProvider]);
+
+  const current = displayOptions.find((m) => m.id === selectedModel) || displayOptions[0];
 
   return (
     <div ref={ref} className="relative">
@@ -48,7 +75,7 @@ export function ModelSelector({ disabled = false }: { disabled?: boolean }) {
         <div className="absolute bottom-full right-0 mb-1 w-48
           bg-bg-card border border-border-subtle rounded-xl shadow-lg
           py-1 z-50 animate-in fade-in slide-in-from-bottom-1 duration-150">
-          {MODEL_OPTIONS.map((option) => (
+          {displayOptions.map((option) => (
             <button
               key={option.id}
               onClick={() => {
@@ -76,7 +103,7 @@ export function ModelSelector({ disabled = false }: { disabled?: boolean }) {
                 }`}
             >
               <div>
-                <div className="font-medium">{option.label}</div>
+                <div className={`font-medium ${option.mapped ? 'font-mono' : ''}`}>{option.label}</div>
               </div>
               {option.id === selectedModel && (
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none"

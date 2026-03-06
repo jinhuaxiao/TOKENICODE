@@ -1,21 +1,33 @@
 mod commands;
 mod protocol;
 
-use commands::{ProcessManager, SessionInfo, StartSessionParams, ManagedProcess, StdinManager};
+use commands::{ManagedProcess, ProcessManager, SessionInfo, StartSessionParams, StdinManager};
 // protocol module kept for ControlRequest (send_control_request) and tests
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
+use std::process::Stdio;
+use std::sync::Arc;
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use std::process::Stdio;
-use std::sync::Arc;
 use tokio::sync::Mutex as TokioMutex;
-use std::collections::HashMap;
-use futures_util::StreamExt;
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+fn claude_needs_cmd_wrapper(bin: &str) -> bool {
+    bin.ends_with(".cmd")
+        || bin.ends_with(".bat")
+        || (!bin.contains('\\') && !bin.contains('/') && !bin.contains('.'))
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r#"'\''"#))
+}
 
 /// Strip ANSI escape sequences from a string (terminal color/cursor codes).
 fn strip_ansi(s: &str) -> String {
@@ -24,10 +36,34 @@ fn strip_ansi(s: &str) -> String {
     while let Some(c) = chars.next() {
         if c == '\x1b' {
             match chars.peek() {
-                Some('[') => { chars.next(); while let Some(&ch) = chars.peek() { chars.next(); if ('\x40'..='\x7e').contains(&ch) { break; } } }
-                Some(']') => { chars.next(); while let Some(ch) = chars.next() { if ch == '\x07' { break; } if ch == '\x1b' && chars.peek() == Some(&'\\') { chars.next(); break; } } }
-                Some('(' | ')') => { chars.next(); chars.next(); }
-                _ => { chars.next(); }
+                Some('[') => {
+                    chars.next();
+                    while let Some(&ch) = chars.peek() {
+                        chars.next();
+                        if ('\x40'..='\x7e').contains(&ch) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next();
+                    while let Some(ch) = chars.next() {
+                        if ch == '\x07' {
+                            break;
+                        }
+                        if ch == '\x1b' && chars.peek() == Some(&'\\') {
+                            chars.next();
+                            break;
+                        }
+                    }
+                }
+                Some('(' | ')') => {
+                    chars.next();
+                    chars.next();
+                }
+                _ => {
+                    chars.next();
+                }
             }
         } else if c < '\x20' && c != '\n' && c != '\r' && c != '\t' {
             // skip control chars
@@ -101,7 +137,9 @@ fn is_valid_executable(path: &std::path::Path) -> bool {
     #[cfg(not(target_os = "windows"))]
     {
         use std::os::unix::fs::PermissionsExt;
-        let Ok(metadata) = std::fs::metadata(path) else { return false };
+        let Ok(metadata) = std::fs::metadata(path) else {
+            return false;
+        };
         // Must have execute permission
         if metadata.permissions().mode() & 0o111 == 0 {
             return false;
@@ -120,7 +158,7 @@ fn is_valid_executable(path: &std::path::Path) -> bool {
                     | [0xFE, 0xED, 0xFA, 0xCE] // Mach-O 32-bit (big-endian)
                     | [0xCA, 0xFE, 0xBA, 0xBE] // Universal/fat binary
                     | [0x23, 0x21, _, _]        // Shebang script (#!/...)
-                    | [0x7F, 0x45, 0x4C, 0x46]  // ELF (Linux — valid on Linux hosts)
+                    | [0x7F, 0x45, 0x4C, 0x46] // ELF (Linux — valid on Linux hosts)
                 );
             }
         }
@@ -276,7 +314,11 @@ fn find_claude_binary() -> Option<String> {
                 return Some(scoop_candidate.to_string_lossy().to_string());
             }
             // nvm-windows / fnm / volta node paths
-            for sub in ["AppData\\Roaming\\nvm", ".volta\\bin", "AppData\\Local\\fnm_multishells"] {
+            for sub in [
+                "AppData\\Roaming\\nvm",
+                ".volta\\bin",
+                "AppData\\Local\\fnm_multishells",
+            ] {
                 let candidate = home.join(sub).join("claude.cmd");
                 if is_valid_executable(&candidate) {
                     return Some(candidate.to_string_lossy().to_string());
@@ -299,10 +341,7 @@ fn find_claude_binary() -> Option<String> {
     // 4. System-wide paths (Unix only)
     #[cfg(not(target_os = "windows"))]
     {
-        for candidate in [
-            "/usr/local/bin/claude",
-            "/opt/homebrew/bin/claude",
-        ] {
+        for candidate in ["/usr/local/bin/claude", "/opt/homebrew/bin/claude"] {
             if is_valid_executable(std::path::Path::new(candidate)) {
                 return Some(candidate.to_string());
             }
@@ -348,6 +387,33 @@ fn find_claude_binary() -> Option<String> {
 /// Used as a fallback when the primary binary hangs (e.g. broken Bun-compiled binary).
 fn find_claude_binary_skip_app_local() -> Option<String> {
     // 1. System PATH
+    #[cfg(target_os = "windows")]
+    {
+        for query in ["claude.cmd", "claude"] {
+            if let Ok(output) = std::process::Command::new("cmd")
+                .args(["/C", "where", query])
+                .creation_flags(0x08000000)
+                .output()
+            {
+                if output.status.success() {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    for line in stdout.lines() {
+                        let path = line.trim().to_string();
+                        if path.is_empty() {
+                            continue;
+                        }
+                        let p = std::path::Path::new(&path);
+                        if p.extension().is_none() {
+                            continue;
+                        }
+                        if is_valid_executable(p) {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+    }
     #[cfg(not(target_os = "windows"))]
     {
         if let Ok(output) = std::process::Command::new("sh")
@@ -365,6 +431,21 @@ fn find_claude_binary_skip_app_local() -> Option<String> {
 
     if let Some(home) = dirs::home_dir() {
         // 2. Claude desktop app bundled CLI
+        #[cfg(target_os = "windows")]
+        {
+            if let Some(local_app) = dirs::data_local_dir() {
+                let claude_code_dir = local_app.join("Claude").join("claude-code");
+                if let Some(bin) = find_newest_version_bin(&claude_code_dir, "claude.exe") {
+                    return Some(bin);
+                }
+            }
+            if let Some(app_data) = dirs::data_dir() {
+                let claude_code_dir = app_data.join("Claude").join("claude-code");
+                if let Some(bin) = find_newest_version_bin(&claude_code_dir, "claude.exe") {
+                    return Some(bin);
+                }
+            }
+        }
         #[cfg(target_os = "macos")]
         {
             let claude_code_dir = home.join("Library/Application Support/Claude/claude-code");
@@ -373,6 +454,23 @@ fn find_claude_binary_skip_app_local() -> Option<String> {
             }
         }
         // 3. Common global install paths
+        #[cfg(target_os = "windows")]
+        {
+            let scoop_candidate = home.join("scoop").join("shims").join("claude.cmd");
+            if is_valid_executable(&scoop_candidate) {
+                return Some(scoop_candidate.to_string_lossy().to_string());
+            }
+            for sub in [
+                "AppData\\Roaming\\nvm",
+                ".volta\\bin",
+                "AppData\\Local\\fnm_multishells",
+            ] {
+                let candidate = home.join(sub).join("claude.cmd");
+                if is_valid_executable(&candidate) {
+                    return Some(candidate.to_string_lossy().to_string());
+                }
+            }
+        }
         #[cfg(not(target_os = "windows"))]
         {
             for candidate in [
@@ -404,10 +502,7 @@ fn find_newest_version_bin(base_dir: &std::path::Path, bin_name: &str) -> Option
         return None;
     }
     if let Ok(entries) = std::fs::read_dir(base_dir) {
-        let mut versions: Vec<_> = entries
-            .flatten()
-            .filter(|e| e.path().is_dir())
-            .collect();
+        let mut versions: Vec<_> = entries.flatten().filter(|e| e.path().is_dir()).collect();
         // Sort by semantic version (descending) so newest version comes first
         versions.sort_by(|a, b| {
             let parse = |name: &std::ffi::OsStr| -> Vec<u64> {
@@ -447,7 +542,10 @@ fn login_shell_extra_path() -> &'static str {
             Ok(o) if o.status.success() => {
                 let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
                 if !p.is_empty() {
-                    eprintln!("login shell PATH captured ({} entries)", p.split(':').count());
+                    eprintln!(
+                        "login shell PATH captured ({} entries)",
+                        p.split(':').count()
+                    );
                 }
                 p
             }
@@ -505,7 +603,8 @@ fn login_shell_proxy_env() -> &'static HashMap<String, String> {
 /// Returns Some(url) if a proxy is configured, None otherwise.
 fn resolve_proxy_url() -> Option<String> {
     // 1. Check current process env vars (set by VPN/Clash when running)
-    let from_env = std::env::var("https_proxy").ok()
+    let from_env = std::env::var("https_proxy")
+        .ok()
         .or_else(|| std::env::var("HTTPS_PROXY").ok())
         .or_else(|| std::env::var("all_proxy").ok())
         .or_else(|| std::env::var("ALL_PROXY").ok())
@@ -520,7 +619,8 @@ fn resolve_proxy_url() -> Option<String> {
     #[cfg(not(target_os = "windows"))]
     {
         let proxy_env = login_shell_proxy_env();
-        let url = proxy_env.get("https_proxy")
+        let url = proxy_env
+            .get("https_proxy")
             .or_else(|| proxy_env.get("HTTPS_PROXY"))
             .or_else(|| proxy_env.get("all_proxy"))
             .or_else(|| proxy_env.get("ALL_PROXY"))
@@ -547,7 +647,9 @@ async fn is_proxy_reachable(proxy_url: &str) -> bool {
     match tokio::time::timeout(
         std::time::Duration::from_secs(1),
         tokio::net::TcpStream::connect(addr),
-    ).await {
+    )
+    .await
+    {
         Ok(Ok(_)) => true,
         _ => false,
     }
@@ -574,7 +676,10 @@ async fn build_smart_http_client(
                 builder = builder.proxy(proxy);
             }
         } else {
-            eprintln!("Smart proxy: proxy {} unreachable, connecting directly", proxy_url);
+            eprintln!(
+                "Smart proxy: proxy {} unreachable, connecting directly",
+                proxy_url
+            );
         }
     }
 
@@ -634,11 +739,32 @@ fn build_enriched_path() -> String {
                 paths.push(app_data.join("npm").to_string_lossy().to_string());
             }
             if let Some(local_app) = dirs::data_local_dir() {
-                paths.push(local_app.join("Programs").join("claude-code").to_string_lossy().to_string());
+                paths.push(
+                    local_app
+                        .join("Programs")
+                        .join("claude-code")
+                        .to_string_lossy()
+                        .to_string(),
+                );
             }
-            paths.push(home.join("scoop").join("shims").to_string_lossy().to_string());
-            paths.push(home.join(".cargo").join("bin").to_string_lossy().to_string());
-            paths.push(home.join(".volta").join("bin").to_string_lossy().to_string());
+            paths.push(
+                home.join("scoop")
+                    .join("shims")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            paths.push(
+                home.join(".cargo")
+                    .join("bin")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+            paths.push(
+                home.join(".volta")
+                    .join("bin")
+                    .to_string_lossy()
+                    .to_string(),
+            );
 
             // nvm-windows: version dirs inside %NVM_HOME% (or %APPDATA%\nvm)
             let nvm_home = std::env::var("NVM_HOME")
@@ -669,7 +795,13 @@ fn build_enriched_path() -> String {
             }
 
             // fnm on Windows
-            paths.push(home.join(".fnm").join("aliases").join("default").to_string_lossy().to_string());
+            paths.push(
+                home.join(".fnm")
+                    .join("aliases")
+                    .join("default")
+                    .to_string_lossy()
+                    .to_string(),
+            );
 
             // Standard Node.js install path
             if let Ok(pf) = std::env::var("ProgramFiles") {
@@ -737,8 +869,7 @@ fn build_enriched_path() -> String {
     {
         let shell_path = login_shell_extra_path();
         if !shell_path.is_empty() {
-            let existing: std::collections::HashSet<String> =
-                paths.iter().cloned().collect();
+            let existing: std::collections::HashSet<String> = paths.iter().cloned().collect();
             let extra: Vec<String> = shell_path
                 .split(':')
                 .filter(|p| !p.is_empty() && !existing.contains(*p))
@@ -827,23 +958,20 @@ fn load_providers() -> Result<ProvidersFile, String> {
     if !path.exists() {
         return Ok(ProvidersFile::default());
     }
-    let data = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Cannot read providers: {}", e))?;
-    serde_json::from_str(&data)
-        .map_err(|e| format!("Cannot parse providers: {}", e))
+    let data =
+        std::fs::read_to_string(&path).map_err(|e| format!("Cannot read providers: {}", e))?;
+    serde_json::from_str(&data).map_err(|e| format!("Cannot parse providers: {}", e))
 }
 
 #[tauri::command]
 fn save_providers(data: ProvidersFile) -> Result<(), String> {
     let path = providers_path()?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Cannot create dir: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("Cannot create dir: {}", e))?;
     }
-    let json = serde_json::to_string_pretty(&data)
-        .map_err(|e| format!("Serialize error: {}", e))?;
-    std::fs::write(&path, json)
-        .map_err(|e| format!("Write error: {}", e))?;
+    let json =
+        serde_json::to_string_pretty(&data).map_err(|e| format!("Serialize error: {}", e))?;
+    std::fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
     Ok(())
 }
 
@@ -861,14 +989,23 @@ struct ConnectionTestResult {
 }
 
 #[tauri::command]
-async fn test_provider_connection(base_url: String, api_format: String, api_key: String, model: String) -> Result<ConnectionTestResult, String> {
+async fn test_provider_connection(
+    base_url: String,
+    api_format: String,
+    api_key: String,
+    model: String,
+) -> Result<ConnectionTestResult, String> {
     let client = build_smart_http_client(
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(30),
-    ).await;
+    )
+    .await;
 
     let base = base_url.trim_end_matches('/');
-    let skipped = StepResult { ok: false, message: "Skipped".to_string() };
+    let skipped = StepResult {
+        ok: false,
+        message: "Skipped".to_string(),
+    };
 
     // Step 1: Connectivity — HEAD request to base URL without auth
     let connectivity_url = if api_format == "openai" {
@@ -876,15 +1013,22 @@ async fn test_provider_connection(base_url: String, api_format: String, api_key:
     } else {
         format!("{}/v1/messages", base)
     };
-    let conn_result = client.head(&connectivity_url)
+    let conn_result = client
+        .head(&connectivity_url)
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await;
     let connectivity = match conn_result {
-        Ok(_resp) => StepResult { ok: true, message: "Reachable".to_string() },
+        Ok(_resp) => StepResult {
+            ok: true,
+            message: "Reachable".to_string(),
+        },
         Err(e) => {
             return Ok(ConnectionTestResult {
-                connectivity: StepResult { ok: false, message: format!("Unreachable: {}", e) },
+                connectivity: StepResult {
+                    ok: false,
+                    message: format!("Unreachable: {}", e),
+                },
                 auth: skipped.clone(),
                 model: skipped,
             });
@@ -905,7 +1049,8 @@ async fn test_provider_connection(base_url: String, api_format: String, api_key:
             "messages": [{"role": "user", "content": "hi"}]
         })
     };
-    let mut auth_req = client.post(&connectivity_url)
+    let mut auth_req = client
+        .post(&connectivity_url)
         .header("Content-Type", "application/json")
         .json(&auth_body)
         .timeout(std::time::Duration::from_secs(10));
@@ -924,17 +1069,30 @@ async fn test_provider_connection(base_url: String, api_format: String, api_key:
                 let text = resp.text().await.unwrap_or_default();
                 return Ok(ConnectionTestResult {
                     connectivity,
-                    auth: StepResult { ok: false, message: format!("HTTP {} — {}", status, text.chars().take(200).collect::<String>()) },
+                    auth: StepResult {
+                        ok: false,
+                        message: format!(
+                            "HTTP {} — {}",
+                            status,
+                            text.chars().take(200).collect::<String>()
+                        ),
+                    },
                     model: skipped,
                 });
             }
             // Any other status (including 400/404 for bad model name) means auth is OK
-            StepResult { ok: true, message: format!("Authenticated (HTTP {})", status) }
+            StepResult {
+                ok: true,
+                message: format!("Authenticated (HTTP {})", status),
+            }
         }
         Err(e) => {
             return Ok(ConnectionTestResult {
                 connectivity,
-                auth: StepResult { ok: false, message: format!("Request failed: {}", e) },
+                auth: StepResult {
+                    ok: false,
+                    message: format!("Request failed: {}", e),
+                },
                 model: skipped,
             });
         }
@@ -954,7 +1112,8 @@ async fn test_provider_connection(base_url: String, api_format: String, api_key:
             "messages": [{"role": "user", "content": "hi"}]
         })
     };
-    let mut model_req = client.post(&connectivity_url)
+    let mut model_req = client
+        .post(&connectivity_url)
         .header("Content-Type", "application/json")
         .json(&model_body)
         .timeout(std::time::Duration::from_secs(15));
@@ -970,30 +1129,45 @@ async fn test_provider_connection(base_url: String, api_format: String, api_key:
         Ok(resp) => {
             let status = resp.status().as_u16();
             if status >= 200 && status < 300 {
-                StepResult { ok: true, message: format!("Model OK (HTTP {})", status) }
+                StepResult {
+                    ok: true,
+                    message: format!("Model OK (HTTP {})", status),
+                }
             } else {
                 let text = resp.text().await.unwrap_or_default();
                 let text_lower = text.to_lowercase();
                 // HTTP 400 from proxies/gateways doesn't necessarily mean model is invalid.
                 // Only flag as model error if the response explicitly says so.
                 let is_model_error = (status == 404)
-                    || (text_lower.contains("model") && (
-                        text_lower.contains("not found")
-                        || text_lower.contains("not_found")
-                        || text_lower.contains("does not exist")
-                        || text_lower.contains("invalid model")
-                        || text_lower.contains("invalid_model")
-                    ));
+                    || (text_lower.contains("model")
+                        && (text_lower.contains("not found")
+                            || text_lower.contains("not_found")
+                            || text_lower.contains("does not exist")
+                            || text_lower.contains("invalid model")
+                            || text_lower.contains("invalid_model")));
                 if is_model_error {
-                    StepResult { ok: false, message: format!("HTTP {} — {}", status, text.chars().take(200).collect::<String>()) }
+                    StepResult {
+                        ok: false,
+                        message: format!(
+                            "HTTP {} — {}",
+                            status,
+                            text.chars().take(200).collect::<String>()
+                        ),
+                    }
                 } else {
                     // Request reached the server and was processed (auth passed, model accepted),
                     // just the minimal test payload was rejected — model is valid.
-                    StepResult { ok: true, message: format!("Model accepted (HTTP {})", status) }
+                    StepResult {
+                        ok: true,
+                        message: format!("Model accepted (HTTP {})", status),
+                    }
                 }
             }
         }
-        Err(e) => StepResult { ok: false, message: format!("Request failed: {}", e) },
+        Err(e) => StepResult {
+            ok: false,
+            message: format!("Request failed: {}", e),
+        },
     };
 
     Ok(ConnectionTestResult {
@@ -1005,13 +1179,17 @@ async fn test_provider_connection(base_url: String, api_format: String, api_key:
 
 /// Resolve provider env vars and CLI args from a provider_id.
 /// Returns (extra_env, keys_to_remove, extra_args).
-fn resolve_provider_env(provider_id: Option<&str>) -> Result<(HashMap<String, String>, Vec<String>, Vec<String>), String> {
+fn resolve_provider_env(
+    provider_id: Option<&str>,
+) -> Result<(HashMap<String, String>, Vec<String>, Vec<String>), String> {
     let Some(pid) = provider_id else {
         return Ok((HashMap::new(), vec![], vec![]));
     };
 
     let providers_file = load_providers()?;
-    let provider = providers_file.providers.iter()
+    let provider = providers_file
+        .providers
+        .iter()
         .find(|p| p.id == pid)
         .ok_or_else(|| format!("Provider '{}' not found", pid))?;
 
@@ -1060,9 +1238,9 @@ async fn start_claude_session(
     stdin_mgr: State<'_, StdinManager>,
     params: StartSessionParams,
 ) -> Result<SessionInfo, String> {
-    let session_id = params.session_id.unwrap_or_else(|| {
-        uuid::Uuid::new_v4().to_string()
-    });
+    let session_id = params
+        .session_id
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // Clean up any existing process with the same session_id
     stdin_mgr.remove(&session_id).await;
@@ -1071,8 +1249,10 @@ async fn start_claude_session(
     // Use persistent stream-json input mode instead of per-message -p mode.
     // This keeps the CLI process alive so slash commands (/rewind, /compact, /cost, etc.) work.
     let mut args = vec![
-        "--input-format".to_string(), "stream-json".to_string(),
-        "--output-format".to_string(), "stream-json".to_string(),
+        "--input-format".to_string(),
+        "stream-json".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
         "--verbose".to_string(),
         "--include-partial-messages".to_string(),
         "--replay-user-messages".to_string(),
@@ -1124,9 +1304,13 @@ async fn start_claude_session(
     // Resolve claude binary — it may not be on the default PATH
     let claude_bin = find_claude_binary().unwrap_or_else(|| {
         #[cfg(target_os = "windows")]
-        { "claude.cmd".to_string() }
+        {
+            "claude.cmd".to_string()
+        }
         #[cfg(not(target_os = "windows"))]
-        { "claude".to_string() }
+        {
+            "claude".to_string()
+        }
     });
 
     // Build an enriched PATH for the child process
@@ -1150,7 +1334,8 @@ async fn start_claude_session(
     // Raise the per-turn output token cap from the CLI default (32K) to 64K.
     // This prevents "response exceeded the 32000 output token maximum" errors
     // when generating large files (e.g. HTML presentations).
-    resolved_env.entry("CLAUDE_CODE_MAX_OUTPUT_TOKENS".to_string())
+    resolved_env
+        .entry("CLAUDE_CODE_MAX_OUTPUT_TOKENS".to_string())
         .or_insert_with(|| "64000".to_string());
 
     // Enable CLI-managed file checkpoints for rewind functionality.
@@ -1171,12 +1356,10 @@ async fn start_claude_session(
             } else {
                 // git-bash is a hard requirement for Claude Code on Windows.
                 // Fail fast with a clear error instead of spawning and getting a silent exit.
-                return Err(
-                    "Claude Code requires Git Bash on Windows.\n\
+                return Err("Claude Code requires Git Bash on Windows.\n\
                      Please reinstall Claude Code via Settings to auto-install Git,\n\
                      or install Git for Windows manually: https://git-scm.com/downloads/win"
-                    .to_string()
-                );
+                    .to_string());
             }
         }
     }
@@ -1241,14 +1424,24 @@ async fn start_claude_session(
                 }
                 let alt_bin = find_claude_binary().unwrap_or_else(|| "claude.cmd".to_string());
                 if alt_bin == claude_bin {
-                    return Err(format!("Failed to spawn claude (tried '{}'): {}", claude_bin, e));
+                    return Err(format!(
+                        "Failed to spawn claude (tried '{}'): {}",
+                        claude_bin, e
+                    ));
                 }
                 eprintln!("Retrying with alternative: {}", alt_bin);
-                spawn_win(&alt_bin)
-                    .map_err(|e2| format!("Failed to spawn claude (tried '{}' then '{}'): {}", claude_bin, alt_bin, e2))?
+                spawn_win(&alt_bin).map_err(|e2| {
+                    format!(
+                        "Failed to spawn claude (tried '{}' then '{}'): {}",
+                        claude_bin, alt_bin, e2
+                    )
+                })?
             }
             Err(e) => {
-                return Err(format!("Failed to spawn claude (tried '{}'): {}", claude_bin, e));
+                return Err(format!(
+                    "Failed to spawn claude (tried '{}'): {}",
+                    claude_bin, e
+                ));
             }
         }
     };
@@ -1278,9 +1471,13 @@ async fn start_claude_session(
 
         match spawn_unix(&claude_bin) {
             Ok(c) => c,
-            Err(e) if e.raw_os_error() == Some(13) => { // EACCES
+            Err(e) if e.raw_os_error() == Some(13) => {
+                // EACCES
                 // Permission denied — attempt to fix execute permission and retry.
-                eprintln!("EACCES on '{}', attempting chmod +x and retrying...", claude_bin);
+                eprintln!(
+                    "EACCES on '{}', attempting chmod +x and retrying...",
+                    claude_bin
+                );
                 let path = std::path::Path::new(&claude_bin);
                 let fixed = (|| -> Result<(), std::io::Error> {
                     use std::os::unix::fs::PermissionsExt;
@@ -1298,13 +1495,20 @@ async fn start_claude_session(
                     ));
                 }
                 eprintln!("chmod +x succeeded, retrying spawn...");
-                spawn_unix(&claude_bin)
-                    .map_err(|e2| format!("Failed to spawn claude (tried '{}', retried after chmod +x): {}", claude_bin, e2))?
+                spawn_unix(&claude_bin).map_err(|e2| {
+                    format!(
+                        "Failed to spawn claude (tried '{}', retried after chmod +x): {}",
+                        claude_bin, e2
+                    )
+                })?
             }
             Err(e) if e.raw_os_error() == Some(88) || e.raw_os_error() == Some(8) => {
                 // ENOEXEC (88 on macOS, 8 on Linux) — Malformed binary.
                 // Delete the corrupt binary and try to find an alternative.
-                eprintln!("ENOEXEC on '{}' (malformed binary), cleaning up and retrying...", claude_bin);
+                eprintln!(
+                    "ENOEXEC on '{}' (malformed binary), cleaning up and retrying...",
+                    claude_bin
+                );
                 if let Some(cli_dir) = cli_download_dir() {
                     let suspect = cli_dir.join("claude");
                     if suspect.exists() {
@@ -1321,37 +1525,50 @@ async fn start_claude_session(
                     ));
                 }
                 eprintln!("Retrying with alternative: {}", alt_bin);
-                spawn_unix(&alt_bin)
-                    .map_err(|e2| format!(
+                spawn_unix(&alt_bin).map_err(|e2| {
+                    format!(
                         "Failed to spawn claude (tried '{}' then '{}'): {}",
                         claude_bin, alt_bin, e2
-                    ))?
+                    )
+                })?
             }
             Err(e) => {
-                return Err(format!("Failed to spawn claude (tried '{}'): {}", claude_bin, e));
+                return Err(format!(
+                    "Failed to spawn claude (tried '{}'): {}",
+                    claude_bin, e
+                ));
             }
         }
     };
 
     let pid = child.id().unwrap_or(0);
-    eprintln!("[TOKENICODE] CLI spawned: pid={}, permission_mode={}, args={:?}", pid, permission_mode, &args);
+    eprintln!(
+        "[TOKENICODE] CLI spawned: pid={}, bin={}, permission_mode={}",
+        pid, claude_bin, permission_mode
+    );
+    eprintln!("[TOKENICODE] args: {:?}", &args);
+    eprintln!("[TOKENICODE] PATH: {}", &enriched_path);
+    eprintln!("[TOKENICODE] resolved_env: {:?}", &resolved_env);
+    eprintln!("[TOKENICODE] cwd: {}", &params.cwd);
 
     // Capture stdin and store in StdinManager for sending follow-up messages
-    let stdin = child.stdin.take()
-        .ok_or("Failed to capture stdin")?;
+    let stdin = child.stdin.take().ok_or("Failed to capture stdin")?;
     stdin_mgr.insert(session_id.clone(), stdin).await;
 
-    let stdout = child.stdout.take()
-        .ok_or("Failed to capture stdout")?;
-    let stderr = child.stderr.take()
-        .ok_or("Failed to capture stderr")?;
+    let stdout = child.stdout.take().ok_or("Failed to capture stdout")?;
+    let stderr = child.stderr.take().ok_or("Failed to capture stderr")?;
 
     let sid = session_id.clone();
 
-    state.insert(sid.clone(), ManagedProcess {
-        child,
-        session_id: sid.clone(),
-    }).await;
+    state
+        .insert(
+            sid.clone(),
+            ManagedProcess {
+                child,
+                session_id: sid.clone(),
+            },
+        )
+        .await;
 
     // Helper: emit to the main webview using emit_to for reliable delivery
     fn emit_to_frontend(app: &AppHandle, event: &str, payload: Value) -> Result<(), String> {
@@ -1380,13 +1597,21 @@ async fn start_claude_session(
             // Log first 10 lines with timing to diagnose startup delay
             if line_count <= 10 {
                 let elapsed = spawn_time.elapsed().as_millis();
-                let preview = if line.len() > 150 { &line[..150] } else { &line };
-                eprintln!("[TOKENICODE:stdout] #{} @{}ms type={} preview={}",
-                    line_count, elapsed,
-                    serde_json::from_str::<Value>(&line).ok()
+                let preview = if line.len() > 150 {
+                    &line[..150]
+                } else {
+                    &line
+                };
+                eprintln!(
+                    "[TOKENICODE:stdout] #{} @{}ms type={} preview={}",
+                    line_count,
+                    elapsed,
+                    serde_json::from_str::<Value>(&line)
+                        .ok()
                         .and_then(|v| v.get("type").and_then(|t| t.as_str().map(String::from)))
                         .unwrap_or_else(|| "?".into()),
-                    preview);
+                    preview
+                );
             }
             // Parse every line as a JSON Value first (avoids serde enum pitfalls)
             let json = match serde_json::from_str::<Value>(&line) {
@@ -1399,29 +1624,38 @@ async fn start_claude_session(
             // auto-approve tool permissions here (zero frontend overhead) but route
             // user interactions (AskUserQuestion) to the frontend.
             if let Some("control_request") = json.get("type").and_then(|v| v.as_str()) {
-                let request_id = json.get("request_id")
+                let request_id = json
+                    .get("request_id")
                     .or_else(|| json.get("requestId"))
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string();
 
                 if let Some(request) = json.get("request") {
-                    let subtype = request.get("subtype").and_then(|v| v.as_str()).unwrap_or_default();
+                    let subtype = request
+                        .get("subtype")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
 
                     // Bypass mode: auto-approve everything except user interactions.
                     if is_bypass {
-                        let tool_name = request.get("tool_name")
+                        let tool_name = request
+                            .get("tool_name")
                             .or_else(|| request.get("toolName"))
                             .and_then(|v| v.as_str())
                             .unwrap_or_default();
                         if tool_name != "AskUserQuestion" {
                             let mut allow = serde_json::json!({ "behavior": "allow" });
                             if subtype == "can_use_tool" {
-                                allow["updatedInput"] = request.get("input").cloned()
+                                allow["updatedInput"] = request
+                                    .get("input")
+                                    .cloned()
                                     .unwrap_or(Value::Object(serde_json::Map::new()));
-                                if let Some(id) = request.get("tool_use_id")
+                                if let Some(id) = request
+                                    .get("tool_use_id")
                                     .or_else(|| request.get("toolUseId"))
-                                    .and_then(|v| v.as_str()) {
+                                    .and_then(|v| v.as_str())
+                                {
                                     allow["toolUseID"] = Value::String(id.to_string());
                                 }
                             }
@@ -1437,21 +1671,27 @@ async fn start_claude_session(
 
                     match subtype {
                         "can_use_tool" => {
-                            let tool_name = request.get("tool_name")
+                            let tool_name = request
+                                .get("tool_name")
                                 .or_else(|| request.get("toolName"))
                                 .and_then(|v| v.as_str())
                                 .unwrap_or_default()
                                 .to_string();
                             let input = request.get("input").cloned().unwrap_or(Value::Null);
-                            let description = request.get("description")
+                            let description = request
+                                .get("description")
                                 .and_then(|v| v.as_str())
                                 .map(String::from);
-                            let tool_use_id = request.get("tool_use_id")
+                            let tool_use_id = request
+                                .get("tool_use_id")
                                 .or_else(|| request.get("toolUseId"))
                                 .and_then(|v| v.as_str())
                                 .map(String::from);
 
-                            eprintln!("[TOKENICODE] permission request: tool={} request_id={}", tool_name, request_id);
+                            eprintln!(
+                                "[TOKENICODE] permission request: tool={} request_id={}",
+                                tool_name, request_id
+                            );
 
                             // Emit as a special stream message (reuses the working stream channel)
                             let perm_payload = serde_json::json!({
@@ -1494,7 +1734,10 @@ async fn start_claude_session(
                         }
                     }
                 } else {
-                    eprintln!("[TOKENICODE] control_request missing 'request' field: {}", &line[..line.len().min(200)]);
+                    eprintln!(
+                        "[TOKENICODE] control_request missing 'request' field: {}",
+                        &line[..line.len().min(200)]
+                    );
                     // Auto-allow to avoid blocking CLI
                     let auto_resp = serde_json::json!({
                         "type": "control_response",
@@ -1528,11 +1771,7 @@ async fn start_claude_session(
         );
 
         // Notify frontend that session list may have changed
-        let _ = emit_to_frontend(
-            &app_clone,
-            "sessions:changed",
-            serde_json::json!(null),
-        );
+        let _ = emit_to_frontend(&app_clone, "sessions:changed", serde_json::json!(null));
     });
 
     // Spawn stderr reader
@@ -1615,12 +1854,16 @@ async fn respond_permission(
     if allow {
         inner.insert("behavior".into(), Value::String("allow".into()));
         // SDK always includes updatedInput with the original tool input on allow
-        inner.insert("updatedInput".into(), updated_input.unwrap_or(Value::Object(serde_json::Map::new())));
+        inner.insert(
+            "updatedInput".into(),
+            updated_input.unwrap_or(Value::Object(serde_json::Map::new())),
+        );
     } else {
         inner.insert("behavior".into(), Value::String("deny".into()));
-        inner.insert("message".into(), Value::String(
-            message.unwrap_or_else(|| "User denied this operation".into()),
-        ));
+        inner.insert(
+            "message".into(),
+            Value::String(message.unwrap_or_else(|| "User denied this operation".into())),
+        );
     }
     if let Some(ref tuid) = tool_use_id {
         inner.insert("toolUseID".into(), Value::String(tuid.clone()));
@@ -1650,20 +1893,23 @@ async fn send_control_request(
     let req = match subtype.as_str() {
         "interrupt" => ControlRequest::interrupt(),
         "set_permission_mode" => {
-            let mode = payload.get("mode")
+            let mode = payload
+                .get("mode")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'mode' in payload")?
                 .to_string();
             ControlRequest::set_permission_mode(mode)
         }
         "set_model" => {
-            let model = payload.get("model")
+            let model = payload
+                .get("model")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             ControlRequest::set_model(model)
         }
         "rewind_files" => {
-            let user_message_id = payload.get("user_message_id")
+            let user_message_id = payload
+                .get("user_message_id")
                 .and_then(|v| v.as_str())
                 .ok_or("Missing 'user_message_id' in payload")?
                 .to_string();
@@ -1723,8 +1969,7 @@ async fn track_session(session_id: String) -> Result<(), String> {
         .append(true)
         .open(&path)
         .map_err(|e| format!("Failed to open tracked sessions: {}", e))?;
-    writeln!(file, "{}", session_id)
-        .map_err(|e| format!("Failed to write session ID: {}", e))?;
+    writeln!(file, "{}", session_id).map_err(|e| format!("Failed to write session ID: {}", e))?;
     Ok(())
 }
 
@@ -1751,12 +1996,16 @@ async fn delete_session(session_id: String, session_path: String) -> Result<(), 
     if !session_path.is_empty() {
         let target = std::path::Path::new(&session_path);
         if target.exists() {
-            let canonical = target.canonicalize()
+            let canonical = target
+                .canonicalize()
                 .map_err(|e| format!("Failed to canonicalize path: {}", e))?;
             let home = dirs::home_dir().ok_or("Cannot find home dir")?;
             let allowed_dir = home.join(".claude").join("projects");
             if !canonical.starts_with(&allowed_dir) {
-                return Err(format!("Refusing to delete file outside ~/.claude/projects/: {:?}", canonical));
+                return Err(format!(
+                    "Refusing to delete file outside ~/.claude/projects/: {:?}",
+                    canonical
+                ));
             }
             std::fs::remove_file(&canonical)
                 .map_err(|e| format!("Failed to delete session file: {}", e))?;
@@ -1806,8 +2055,7 @@ async fn list_sessions() -> Result<Vec<Value>, String> {
 
                                 // Use cwd from JSONL if available (authoritative),
                                 // otherwise fall back to decoding the directory name.
-                                let project_dir = entry.file_name()
-                                    .to_string_lossy().to_string();
+                                let project_dir = entry.file_name().to_string_lossy().to_string();
                                 let project_name = if cwd.is_empty() {
                                     decode_project_name(&project_dir)
                                 } else {
@@ -1908,7 +2156,9 @@ fn extract_session_info(path: &std::path::Path) -> (String, String) {
                                     }
                                 }
                             }
-                            if !preview.is_empty() { break; }
+                            if !preview.is_empty() {
+                                break;
+                            }
                         }
                         if let Some(text) = block["content"].as_str() {
                             let trimmed = text.trim();
@@ -2003,8 +2253,12 @@ fn decode_project_name(encoded: &str) -> String {
             // Separators to try: hyphen (original name), space, dot
             for join_sep in ["-", " ", "."] {
                 let candidate = slice.join(join_sep);
-                let full_path = format!("{}{}{}", parent,
-                    if parent.ends_with(sep) { "" } else { sep }, candidate);
+                let full_path = format!(
+                    "{}{}{}",
+                    parent,
+                    if parent.ends_with(sep) { "" } else { sep },
+                    candidate
+                );
                 if std::path::Path::new(&full_path).exists() {
                     best_len = j - i;
                     best_segment = candidate;
@@ -2036,8 +2290,12 @@ fn decode_project_name(encoded: &str) -> String {
                     for join_sep in ["-", " ", "."] {
                         let after = parts[i..j].join(join_sep);
                         let candidate = format!("{}{}", prefix, after);
-                        let full_path = format!("{}{}{}", parent,
-                            if parent.ends_with(sep) { "" } else { sep }, candidate);
+                        let full_path = format!(
+                            "{}{}{}",
+                            parent,
+                            if parent.ends_with(sep) { "" } else { sep },
+                            candidate
+                        );
                         if std::path::Path::new(&full_path).exists() {
                             decoded_segments.push(candidate);
                             i = j;
@@ -2045,7 +2303,9 @@ fn decode_project_name(encoded: &str) -> String {
                             break;
                         }
                     }
-                    if dot_found { break; }
+                    if dot_found {
+                        break;
+                    }
                 }
                 if !dot_found {
                     // Fallback: just use dot + next part as segment
@@ -2072,8 +2332,7 @@ fn decode_project_name(encoded: &str) -> String {
 #[tauri::command]
 async fn load_session(path: String) -> Result<Vec<Value>, String> {
     use std::io::BufRead;
-    let file = std::fs::File::open(&path)
-        .map_err(|e| format!("Failed to open session: {}", e))?;
+    let file = std::fs::File::open(&path).map_err(|e| format!("Failed to open session: {}", e))?;
     let reader = std::io::BufReader::new(file);
     let mut messages = vec![];
     for line in reader.lines() {
@@ -2161,8 +2420,8 @@ async fn open_with_default_app(path: String) -> Result<(), String> {
 /// Returns a raw pointer to the NSURL object, or null on failure.
 #[cfg(target_os = "macos")]
 unsafe fn create_nsurl_from_path(path: &str) -> *mut objc::runtime::Object {
-    use objc::runtime::{Class, Object};
     use objc::msg_send;
+    use objc::runtime::{Class, Object};
     use objc::sel;
     use objc::sel_impl;
 
@@ -2193,13 +2452,15 @@ async fn share_file(path: String, app: AppHandle) -> Result<(), String> {
         app.run_on_main_thread(move || {
             objc::rc::autoreleasepool(|| {
                 unsafe {
-                    use objc::runtime::{Class, Object};
                     use objc::msg_send;
+                    use objc::runtime::{Class, Object};
                     use objc::sel;
                     use objc::sel_impl;
 
                     let file_url = create_nsurl_from_path(&path);
-                    if file_url.is_null() { return; }
+                    if file_url.is_null() {
+                        return;
+                    }
 
                     // Create NSArray with the URL
                     let nsarray_class = Class::get("NSArray").unwrap();
@@ -2211,20 +2472,27 @@ async fn share_file(path: String, app: AppHandle) -> Result<(), String> {
                     let picker_class = Class::get("NSSharingServicePicker").unwrap();
                     let picker: *mut Object = msg_send![picker_class, alloc];
                     let picker: *mut Object = msg_send![picker, initWithItems: items];
-                    if picker.is_null() { return; }
+                    if picker.is_null() {
+                        return;
+                    }
 
                     // Get key window's content view
                     let nsapp_class = Class::get("NSApplication").unwrap();
                     let nsapp: *mut Object = msg_send![nsapp_class, sharedApplication];
                     let key_window: *mut Object = msg_send![nsapp, keyWindow];
-                    if key_window.is_null() { return; }
+                    if key_window.is_null() {
+                        return;
+                    }
 
                     let content_view: *mut Object = msg_send![key_window, contentView];
-                    if content_view.is_null() { return; }
+                    if content_view.is_null() {
+                        return;
+                    }
 
                     // Get mouse position and convert to view coordinates
                     let nsevent_class = Class::get("NSEvent").unwrap();
-                    let mouse_screen: cocoa::foundation::NSPoint = msg_send![nsevent_class, mouseLocation];
+                    let mouse_screen: cocoa::foundation::NSPoint =
+                        msg_send![nsevent_class, mouseLocation];
                     let mouse_window: cocoa::foundation::NSPoint = msg_send![key_window,
                         convertPointFromScreen: mouse_screen
                     ];
@@ -2244,7 +2512,8 @@ async fn share_file(path: String, app: AppHandle) -> Result<(), String> {
                     ];
                 }
             });
-        }).map_err(|e| format!("Failed to share: {}", e))?;
+        })
+        .map_err(|e| format!("Failed to share: {}", e))?;
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -2264,13 +2533,15 @@ async fn share_to_wechat(path: String, app: AppHandle) -> Result<(), String> {
         app.run_on_main_thread(move || {
             objc::rc::autoreleasepool(|| {
                 unsafe {
-                    use objc::runtime::{Class, Object};
                     use objc::msg_send;
+                    use objc::runtime::{Class, Object};
                     use objc::sel;
                     use objc::sel_impl;
 
                     let file_url = create_nsurl_from_path(&path);
-                    if file_url.is_null() { return; }
+                    if file_url.is_null() {
+                        return;
+                    }
 
                     // Create NSArray with the URL
                     let nsarray_class = Class::get("NSArray").unwrap();
@@ -2291,7 +2562,9 @@ async fn share_to_wechat(path: String, app: AppHandle) -> Result<(), String> {
                         let service: *mut Object = msg_send![services, objectAtIndex: i];
                         let title: *mut Object = msg_send![service, title];
                         let utf8: *const std::ffi::c_char = msg_send![title, UTF8String];
-                        if utf8.is_null() { continue; }
+                        if utf8.is_null() {
+                            continue;
+                        }
                         let title_str = std::ffi::CStr::from_ptr(utf8).to_string_lossy();
                         if title_str.contains("WeChat") || title_str.contains("微信") {
                             let _: () = msg_send![service, performWithItems: items];
@@ -2300,7 +2573,9 @@ async fn share_to_wechat(path: String, app: AppHandle) -> Result<(), String> {
                     }
 
                     // WeChat service not found — log for debugging
-                    eprintln!("[share_to_wechat] WeChat sharing service not found. Available services:");
+                    eprintln!(
+                        "[share_to_wechat] WeChat sharing service not found. Available services:"
+                    );
                     for i in 0..count {
                         let service: *mut Object = msg_send![services, objectAtIndex: i];
                         let title: *mut Object = msg_send![service, title];
@@ -2312,7 +2587,8 @@ async fn share_to_wechat(path: String, app: AppHandle) -> Result<(), String> {
                     }
                 }
             });
-        }).map_err(|e| format!("Failed to share to WeChat: {}", e))?;
+        })
+        .map_err(|e| format!("Failed to share to WeChat: {}", e))?;
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -2354,7 +2630,9 @@ fn read_dir_recursive(dir: &std::path::Path, current_depth: u32, max_depth: u32)
         let a_dir = a.path().is_dir();
         let b_dir = b.path().is_dir();
         b_dir.cmp(&a_dir).then_with(|| {
-            a.file_name().to_string_lossy().to_lowercase()
+            a.file_name()
+                .to_string_lossy()
+                .to_lowercase()
                 .cmp(&b.file_name().to_string_lossy().to_lowercase())
         })
     });
@@ -2362,12 +2640,23 @@ fn read_dir_recursive(dir: &std::path::Path, current_depth: u32, max_depth: u32)
     for entry in entries {
         let name = entry.file_name().to_string_lossy().to_string();
         // Skip specific ignored dirs (but show dotfiles like .claude, .github, .vscode)
-        if name == "node_modules" || name == "target" || name == "__pycache__"
-            || name == ".git" || name == ".DS_Store" || name == "Thumbs.db"
-            || name == ".venv" || name == "venv" || name == ".env"
-            || name == "dist" || name == "build" || name == ".next"
-            || name == ".nuxt" || name == ".parcel-cache" || name == "coverage"
-            || name == ".turbo" || name == ".svelte-kit"
+        if name == "node_modules"
+            || name == "target"
+            || name == "__pycache__"
+            || name == ".git"
+            || name == ".DS_Store"
+            || name == "Thumbs.db"
+            || name == ".venv"
+            || name == "venv"
+            || name == ".env"
+            || name == "dist"
+            || name == "build"
+            || name == ".next"
+            || name == ".nuxt"
+            || name == ".parcel-cache"
+            || name == "coverage"
+            || name == ".turbo"
+            || name == ".svelte-kit"
         {
             continue;
         }
@@ -2395,13 +2684,11 @@ fn read_dir_recursive(dir: &std::path::Path, current_depth: u32, max_depth: u32)
 #[tauri::command]
 async fn read_file_content(path: String) -> Result<String, String> {
     // Limit to 1MB to prevent loading huge files
-    let metadata = std::fs::metadata(&path)
-        .map_err(|e| format!("Cannot read file: {}", e))?;
+    let metadata = std::fs::metadata(&path).map_err(|e| format!("Cannot read file: {}", e))?;
     if metadata.len() > 1_048_576 {
         return Err("File too large (>1MB)".to_string());
     }
-    std::fs::read_to_string(&path)
-        .map_err(|e| format!("Cannot read file: {}", e))
+    std::fs::read_to_string(&path).map_err(|e| format!("Cannot read file: {}", e))
 }
 
 /// Check if the app has file system access to a given directory.
@@ -2423,14 +2710,12 @@ async fn check_file_access(path: String) -> Result<bool, String> {
 async fn read_file_base64(path: String) -> Result<String, String> {
     use base64::Engine as _;
 
-    let metadata = std::fs::metadata(&path)
-        .map_err(|e| format!("Cannot read file: {}", e))?;
+    let metadata = std::fs::metadata(&path).map_err(|e| format!("Cannot read file: {}", e))?;
     if metadata.len() > 50_000_000 {
         return Err("File too large (>50MB)".to_string());
     }
 
-    let bytes = std::fs::read(&path)
-        .map_err(|e| format!("Cannot read file: {}", e))?;
+    let bytes = std::fs::read(&path).map_err(|e| format!("Cannot read file: {}", e))?;
 
     // Guess MIME type from extension
     let ext = std::path::Path::new(&path)
@@ -2462,8 +2747,7 @@ async fn read_file_base64(path: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn write_file_content(path: String, content: String) -> Result<(), String> {
-    std::fs::write(&path, &content)
-        .map_err(|e| format!("Cannot write file: {}", e))
+    std::fs::write(&path, &content).map_err(|e| format!("Cannot write file: {}", e))
 }
 
 #[tauri::command]
@@ -2475,28 +2759,24 @@ async fn copy_file(src: String, dest: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn rename_file(src: String, dest: String) -> Result<(), String> {
-    std::fs::rename(&src, &dest)
-        .map_err(|e| format!("Cannot rename file: {}", e))
+    std::fs::rename(&src, &dest).map_err(|e| format!("Cannot rename file: {}", e))
 }
 
 #[tauri::command]
 async fn delete_file(path: String) -> Result<(), String> {
     // Move to system trash/recycle bin (recoverable) instead of permanent delete
-    trash::delete(&path)
-        .map_err(|e| format!("Cannot move to trash: {}", e))
+    trash::delete(&path).map_err(|e| format!("Cannot move to trash: {}", e))
 }
 
 #[tauri::command]
 async fn create_directory(path: String) -> Result<(), String> {
-    std::fs::create_dir_all(&path)
-        .map_err(|e| format!("Cannot create directory: {}", e))
+    std::fs::create_dir_all(&path).map_err(|e| format!("Cannot create directory: {}", e))
 }
 
 #[tauri::command]
 async fn export_session_markdown(path: String, output_path: String) -> Result<(), String> {
     use std::io::{BufRead, Write};
-    let file = std::fs::File::open(&path)
-        .map_err(|e| format!("Failed to open session: {}", e))?;
+    let file = std::fs::File::open(&path).map_err(|e| format!("Failed to open session: {}", e))?;
     let reader = std::io::BufReader::new(file);
 
     let mut md = String::from("# Claude Code Session\n\n");
@@ -2536,8 +2816,10 @@ async fn export_session_markdown(path: String, output_path: String) -> Result<()
                                     md.push_str(&format!("**Tool: {}**\n\n", name));
                                     if let Some(input) = block.get("input") {
                                         md.push_str("```json\n");
-                                        md.push_str(&serde_json::to_string_pretty(input)
-                                            .unwrap_or_default());
+                                        md.push_str(
+                                            &serde_json::to_string_pretty(input)
+                                                .unwrap_or_default(),
+                                        );
                                         md.push_str("\n```\n\n");
                                     }
                                 }
@@ -2560,8 +2842,7 @@ async fn export_session_markdown(path: String, output_path: String) -> Result<()
 #[tauri::command]
 async fn export_session_json(path: String, output_path: String) -> Result<(), String> {
     use std::io::{BufRead, Write};
-    let file = std::fs::File::open(&path)
-        .map_err(|e| format!("Failed to open session: {}", e))?;
+    let file = std::fs::File::open(&path).map_err(|e| format!("Failed to open session: {}", e))?;
     let reader = std::io::BufReader::new(file);
     let mut messages = vec![];
     for line in reader.lines() {
@@ -2622,30 +2903,33 @@ async fn list_recent_projects() -> Result<Vec<Value>, String> {
         }
     }
 
-    let mut result: Vec<Value> = projects.into_iter().map(|(path, ts)| {
-        let name = std::path::Path::new(&path)
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| path.clone());
-        let short_path = {
-            if let Some(home) = dirs::home_dir() {
-                let home_str = home.to_string_lossy().to_string();
-                if path.starts_with(&home_str) {
-                    format!("~{}", &path[home_str.len()..])
+    let mut result: Vec<Value> = projects
+        .into_iter()
+        .map(|(path, ts)| {
+            let name = std::path::Path::new(&path)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.clone());
+            let short_path = {
+                if let Some(home) = dirs::home_dir() {
+                    let home_str = home.to_string_lossy().to_string();
+                    if path.starts_with(&home_str) {
+                        format!("~{}", &path[home_str.len()..])
+                    } else {
+                        path.clone()
+                    }
                 } else {
                     path.clone()
                 }
-            } else {
-                path.clone()
-            }
-        };
-        serde_json::json!({
-            "name": name,
-            "path": path,
-            "shortPath": short_path,
-            "lastUsed": ts,
+            };
+            serde_json::json!({
+                "name": name,
+                "path": path,
+                "shortPath": short_path,
+                "lastUsed": ts,
+            })
         })
-    }).collect();
+        .collect();
 
     result.sort_by(|a, b| {
         let ta = a["lastUsed"].as_u64().unwrap_or(0);
@@ -2666,7 +2950,7 @@ async fn watch_directory(
     state: State<'_, WatcherManager>,
     path: String,
 ) -> Result<(), String> {
-    use notify::{Watcher, RecursiveMode, Event, EventKind};
+    use notify::{Event, EventKind, RecursiveMode, Watcher};
 
     // Stop existing watcher for this path if any
     {
@@ -2685,18 +2969,25 @@ async fn watch_directory(
                 EventKind::Remove(_) => "removed",
                 _ => return,
             };
-            let paths: Vec<String> = event.paths.iter()
+            let paths: Vec<String> = event
+                .paths
+                .iter()
                 .map(|p| p.to_string_lossy().to_string())
                 .collect();
-            let _ = app_clone.emit("fs:change", serde_json::json!({
-                "kind": kind,
-                "paths": paths,
-                "root": path_clone,
-            }));
+            let _ = app_clone.emit(
+                "fs:change",
+                serde_json::json!({
+                    "kind": kind,
+                    "paths": paths,
+                    "root": path_clone,
+                }),
+            );
         }
-    }).map_err(|e| format!("Failed to create watcher: {}", e))?;
+    })
+    .map_err(|e| format!("Failed to create watcher: {}", e))?;
 
-    watcher.watch(std::path::Path::new(&path), RecursiveMode::Recursive)
+    watcher
+        .watch(std::path::Path::new(&path), RecursiveMode::Recursive)
         .map_err(|e| format!("Failed to watch: {}", e))?;
 
     let mut watchers = state.watchers.lock().await;
@@ -2706,10 +2997,7 @@ async fn watch_directory(
 }
 
 #[tauri::command]
-async fn unwatch_directory(
-    state: State<'_, WatcherManager>,
-    path: String,
-) -> Result<(), String> {
+async fn unwatch_directory(state: State<'_, WatcherManager>, path: String) -> Result<(), String> {
     let mut watchers = state.watchers.lock().await;
     watchers.remove(&path);
     Ok(())
@@ -2718,22 +3006,30 @@ async fn unwatch_directory(
 /// Get file size in bytes for a given path
 #[tauri::command]
 async fn get_file_size(path: String) -> Result<u64, String> {
-    let metadata = std::fs::metadata(&path)
-        .map_err(|e| format!("Cannot read file metadata: {}", e))?;
+    let metadata =
+        std::fs::metadata(&path).map_err(|e| format!("Cannot read file metadata: {}", e))?;
     Ok(metadata.len())
 }
 
 /// Save a file to a temp directory and return its path.
 /// Uses a unique suffix to avoid name collisions (e.g. multiple pasted images all named "image.png").
 #[tauri::command]
-async fn save_temp_file(name: String, data: Vec<u8>, cwd: Option<String>) -> Result<String, String> {
+async fn save_temp_file(
+    name: String,
+    data: Vec<u8>,
+    cwd: Option<String>,
+) -> Result<String, String> {
     // If a working directory is provided, save inside it so Claude CLI can access the file.
     // Falls back to system temp if cwd is not set.
     let tmp = if let Some(ref dir) = cwd {
-        let p = std::path::PathBuf::from(dir).join(".tokenicode").join("tmp");
+        let p = std::path::PathBuf::from(dir)
+            .join(".tokenicode")
+            .join("tmp");
         if std::fs::create_dir_all(&p).is_ok() {
             // Ensure .tokenicode is gitignored in user's project
-            let gitignore = std::path::PathBuf::from(dir).join(".tokenicode").join(".gitignore");
+            let gitignore = std::path::PathBuf::from(dir)
+                .join(".tokenicode")
+                .join(".gitignore");
             if !gitignore.exists() {
                 let _ = std::fs::write(&gitignore, "*\n");
             }
@@ -2748,8 +3044,15 @@ async fn save_temp_file(name: String, data: Vec<u8>, cwd: Option<String>) -> Res
 
     // Split name into stem + extension, append timestamp + counter for uniqueness
     let path_buf = std::path::PathBuf::from(&name);
-    let stem = path_buf.file_stem().unwrap_or_default().to_string_lossy().to_string();
-    let ext = path_buf.extension().map(|e| format!(".{}", e.to_string_lossy())).unwrap_or_default();
+    let stem = path_buf
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let ext = path_buf
+        .extension()
+        .map(|e| format!(".{}", e.to_string_lossy()))
+        .unwrap_or_default();
 
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -2779,13 +3082,13 @@ struct SlashCommand {
 struct UnifiedCommand {
     name: String,
     description: String,
-    source: String,       // "builtin" | "global" | "project"
-    category: String,     // "builtin" | "command" | "skill"
+    source: String,   // "builtin" | "global" | "project"
+    category: String, // "builtin" | "command" | "skill"
     has_args: bool,
     path: Option<String>, // Only for skills, points to SKILL.md
     immediate: bool,      // true = execute immediately (no message sent)
     #[serde(skip_serializing_if = "Option::is_none")]
-    execution: Option<String>,  // "ui" | "cli" | "session" — how command is executed
+    execution: Option<String>, // "ui" | "cli" | "session" — how command is executed
 }
 
 /// Scan and return all available slash commands (built-in + custom .md files)
@@ -2844,7 +3147,8 @@ async fn list_slash_commands(cwd: Option<String>) -> Result<Vec<SlashCommand>, S
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map_or(false, |e| e == "md") {
-                let stem = path.file_stem()
+                let stem = path
+                    .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let name = format!("/{}", stem);
@@ -2876,7 +3180,9 @@ async fn list_slash_commands(cwd: Option<String>) -> Result<Vec<SlashCommand>, S
 
     // Project custom commands: {cwd}/.claude/commands/*.md
     if let Some(ref cwd_path) = cwd {
-        let project_dir = std::path::Path::new(cwd_path).join(".claude").join("commands");
+        let project_dir = std::path::Path::new(cwd_path)
+            .join(".claude")
+            .join("commands");
         commands.extend(scan_commands_dir(&project_dir, "project"));
     }
 
@@ -3043,7 +3349,8 @@ async fn list_skills(cwd: Option<String>) -> Result<Vec<SkillInfo>, String> {
                     let (fm, body) = parse_skill_frontmatter(&content);
 
                     // Description priority: frontmatter > first non-empty body line > dir name
-                    let description = fm.description
+                    let description = fm
+                        .description
                         .clone()
                         .or_else(|| {
                             body.lines()
@@ -3082,7 +3389,9 @@ async fn list_skills(cwd: Option<String>) -> Result<Vec<SkillInfo>, String> {
 
     // Project skills: {cwd}/.claude/skills/*/SKILL.md
     if let Some(ref cwd_path) = cwd {
-        let project_dir = std::path::Path::new(cwd_path).join(".claude").join("skills");
+        let project_dir = std::path::Path::new(cwd_path)
+            .join(".claude")
+            .join("skills");
         skills.extend(scan_skills_dir(&project_dir, "project"));
     }
 
@@ -3092,8 +3401,7 @@ async fn list_skills(cwd: Option<String>) -> Result<Vec<SkillInfo>, String> {
 /// Read a skill file and return its content
 #[tauri::command]
 async fn read_skill(path: String) -> Result<String, String> {
-    std::fs::read_to_string(&path)
-        .map_err(|e| format!("Cannot read skill file: {}", e))
+    std::fs::read_to_string(&path).map_err(|e| format!("Cannot read skill file: {}", e))
 }
 
 /// Write content to a skill file, creating parent directories if needed
@@ -3104,16 +3412,14 @@ async fn write_skill(path: String, content: String) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("Failed to create directories: {}", e))?;
     }
-    std::fs::write(&path, &content)
-        .map_err(|e| format!("Cannot write skill file: {}", e))
+    std::fs::write(&path, &content).map_err(|e| format!("Cannot write skill file: {}", e))
 }
 
 /// Delete a skill file; remove the parent directory if it becomes empty
 #[tauri::command]
 async fn delete_skill(path: String) -> Result<(), String> {
     let p = std::path::Path::new(&path);
-    std::fs::remove_file(p)
-        .map_err(|e| format!("Failed to delete skill file: {}", e))?;
+    std::fs::remove_file(p).map_err(|e| format!("Failed to delete skill file: {}", e))?;
 
     // If the parent directory is now empty, remove it too
     if let Some(parent) = p.parent() {
@@ -3140,27 +3446,77 @@ async fn list_all_commands(cwd: Option<String>) -> Result<Vec<UnifiedCommand>, S
     let builtins: [(&str, &str, bool, &str); 24] = [
         ("/ask", "Ask a question without making changes", false, "ui"),
         ("/bug", "Report a bug with Claude Code", false, "ui"),
-        ("/bypass", "Switch to bypass mode (skip all permission prompts)", false, "ui"),
+        (
+            "/bypass",
+            "Switch to bypass mode (skip all permission prompts)",
+            false,
+            "ui",
+        ),
         ("/clear", "Clear conversation history", false, "ui"),
         ("/code", "Switch to code mode (default)", false, "ui"),
-        ("/compact", "Compact conversation to reduce context", false, "session"),
-        ("/context", "Manage context files and directories", false, "session"),
+        (
+            "/compact",
+            "Compact conversation to reduce context",
+            false,
+            "session",
+        ),
+        (
+            "/context",
+            "Manage context files and directories",
+            false,
+            "session",
+        ),
         ("/cost", "Show session cost and token usage", false, "ui"),
-        ("/doctor", "Check Claude Code health status", false, "session"),
+        (
+            "/doctor",
+            "Check Claude Code health status",
+            false,
+            "session",
+        ),
         ("/export", "Export conversation to markdown", true, "ui"),
         ("/help", "Show available commands", false, "ui"),
-        ("/init", "Initialize project configuration", false, "session"),
+        (
+            "/init",
+            "Initialize project configuration",
+            false,
+            "session",
+        ),
         ("/mcp", "Manage MCP server connections", false, "session"),
         ("/memory", "View or edit MEMORY.md files", false, "session"),
-        ("/permissions", "View and manage tool permissions", false, "session"),
+        (
+            "/permissions",
+            "View and manage tool permissions",
+            false,
+            "session",
+        ),
         ("/plan", "Enter plan mode for complex tasks", false, "ui"),
         ("/rename", "Rename the current session", true, "ui"),
-        ("/rewind", "Rewind conversation to a previous turn", false, "ui"),
+        (
+            "/rewind",
+            "Rewind conversation to a previous turn",
+            false,
+            "ui",
+        ),
         ("/stats", "Show session statistics", false, "session"),
-        ("/statusline", "Configure status line display", false, "session"),
+        (
+            "/statusline",
+            "Configure status line display",
+            false,
+            "session",
+        ),
         ("/tasks", "View running background tasks", false, "session"),
-        ("/teleport", "Teleport context to a new session", false, "session"),
-        ("/todos", "View todo items from the session", false, "session"),
+        (
+            "/teleport",
+            "Teleport context to a new session",
+            false,
+            "session",
+        ),
+        (
+            "/todos",
+            "View todo items from the session",
+            false,
+            "session",
+        ),
         ("/usage", "Show detailed token usage breakdown", false, "ui"),
     ];
     for (name, desc, has_args, execution) in &builtins {
@@ -3186,7 +3542,8 @@ async fn list_all_commands(cwd: Option<String>) -> Result<Vec<UnifiedCommand>, S
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().map_or(false, |e| e == "md") {
-                let stem = path.file_stem()
+                let stem = path
+                    .file_stem()
                     .map(|s| s.to_string_lossy().to_string())
                     .unwrap_or_default();
                 let name = format!("/{}", stem);
@@ -3234,7 +3591,8 @@ async fn list_all_commands(cwd: Option<String>) -> Result<Vec<UnifiedCommand>, S
                     let content = std::fs::read_to_string(&skill_file).unwrap_or_default();
                     let (fm, body) = parse_skill_frontmatter(&content);
 
-                    let description = fm.description
+                    let description = fm
+                        .description
                         .clone()
                         .or_else(|| {
                             body.lines()
@@ -3270,7 +3628,9 @@ async fn list_all_commands(cwd: Option<String>) -> Result<Vec<UnifiedCommand>, S
 
     // 3. Project custom commands: {cwd}/.claude/commands/*.md
     if let Some(ref cwd_path) = cwd {
-        let project_dir = std::path::Path::new(cwd_path).join(".claude").join("commands");
+        let project_dir = std::path::Path::new(cwd_path)
+            .join(".claude")
+            .join("commands");
         commands.extend(scan_commands_dir(&project_dir, "project"));
     }
 
@@ -3282,7 +3642,9 @@ async fn list_all_commands(cwd: Option<String>) -> Result<Vec<UnifiedCommand>, S
 
     // 5. Project skills: {cwd}/.claude/skills/*/SKILL.md
     if let Some(ref cwd_path) = cwd {
-        let project_dir = std::path::Path::new(cwd_path).join(".claude").join("skills");
+        let project_dir = std::path::Path::new(cwd_path)
+            .join(".claude")
+            .join("skills");
         commands.extend(scan_skills_dir(&project_dir, "project"));
     }
 
@@ -3293,8 +3655,8 @@ async fn list_all_commands(cwd: Option<String>) -> Result<Vec<UnifiedCommand>, S
 /// `disable-model-invocation` in its YAML frontmatter.
 #[tauri::command]
 async fn toggle_skill_enabled(path: String, enabled: bool) -> Result<(), String> {
-    let content = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Cannot read skill file: {}", e))?;
+    let content =
+        std::fs::read_to_string(&path).map_err(|e| format!("Cannot read skill file: {}", e))?;
     let new_content = if enabled {
         // Remove disable-model-invocation (or set to false)
         update_frontmatter_field(&content, "disable-model-invocation", None)
@@ -3302,8 +3664,7 @@ async fn toggle_skill_enabled(path: String, enabled: bool) -> Result<(), String>
         // Set disable-model-invocation: true
         update_frontmatter_field(&content, "disable-model-invocation", Some("true"))
     };
-    std::fs::write(&path, &new_content)
-        .map_err(|e| format!("Cannot write skill file: {}", e))
+    std::fs::write(&path, &new_content).map_err(|e| format!("Cannot write skill file: {}", e))
 }
 
 // --- Git / Shell helpers for Rewind code restore ---
@@ -3326,38 +3687,40 @@ async fn toggle_skill_enabled(path: String, enabled: bool) -> Result<(), String>
 #[cfg(target_os = "macos")]
 fn resolve_git_binary() -> Option<&'static str> {
     static GIT_BIN: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    GIT_BIN.get_or_init(|| {
-        // Check if Xcode CLT is installed (xcode-select -p does NOT trigger popup)
-        let clt_check = std::process::Command::new("xcode-select")
-            .arg("-p")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        if let Ok(status) = clt_check {
-            if status.success() {
-                // CLT installed → /usr/bin/git works, use bare "git" to respect PATH order
-                return Some("git".to_string());
+    GIT_BIN
+        .get_or_init(|| {
+            // Check if Xcode CLT is installed (xcode-select -p does NOT trigger popup)
+            let clt_check = std::process::Command::new("xcode-select")
+                .arg("-p")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+            if let Ok(status) = clt_check {
+                if status.success() {
+                    // CLT installed → /usr/bin/git works, use bare "git" to respect PATH order
+                    return Some("git".to_string());
+                }
             }
-        }
 
-        // CLT not installed → scan known third-party git install locations.
-        // IMPORTANT: Do NOT include /usr/bin/git here — that's the shim that triggers the popup.
-        let candidates = [
-            "/opt/homebrew/bin/git",  // Homebrew (Apple Silicon)
-            "/usr/local/bin/git",     // Homebrew (Intel) or manual install
-            "/opt/local/bin/git",     // MacPorts
-            "/nix/var/nix/profiles/default/bin/git", // Nix
-        ];
-        for path in &candidates {
-            if std::path::Path::new(path).exists() {
-                eprintln!("resolve_git_binary: CLT not installed, using {}", path);
-                return Some(path.to_string());
+            // CLT not installed → scan known third-party git install locations.
+            // IMPORTANT: Do NOT include /usr/bin/git here — that's the shim that triggers the popup.
+            let candidates = [
+                "/opt/homebrew/bin/git",                 // Homebrew (Apple Silicon)
+                "/usr/local/bin/git",                    // Homebrew (Intel) or manual install
+                "/opt/local/bin/git",                    // MacPorts
+                "/nix/var/nix/profiles/default/bin/git", // Nix
+            ];
+            for path in &candidates {
+                if std::path::Path::new(path).exists() {
+                    eprintln!("resolve_git_binary: CLT not installed, using {}", path);
+                    return Some(path.to_string());
+                }
             }
-        }
 
-        eprintln!("resolve_git_binary: no git found (CLT not installed, no third-party git)");
-        None
-    }).as_deref()
+            eprintln!("resolve_git_binary: no git found (CLT not installed, no third-party git)");
+            None
+        })
+        .as_deref()
 }
 
 /// Run a git command in a specific working directory and return stdout.
@@ -3366,8 +3729,15 @@ fn resolve_git_binary() -> Option<&'static str> {
 async fn run_git_command(cwd: String, args: Vec<String>) -> Result<String, String> {
     // Allowlist: only safe git subcommands
     let allowed_subcommands = [
-        "status", "diff", "log", "show", "stash", "checkout", "rev-parse",
-        "hash-object", "cat-file",
+        "status",
+        "diff",
+        "log",
+        "show",
+        "stash",
+        "checkout",
+        "rev-parse",
+        "hash-object",
+        "cat-file",
     ];
     let subcmd = args.first().map(|s| s.as_str()).unwrap_or("");
     if !allowed_subcommands.contains(&subcmd) {
@@ -3425,7 +3795,11 @@ async fn run_git_command(cwd: String, args: Vec<String>) -> Result<String, Strin
 /// Rewind files to a CLI checkpoint via `claude --resume <session_id> --rewind-files <uuid>`.
 /// This delegates file restoration to the CLI's native checkpoint system.
 #[tauri::command]
-async fn rewind_files(session_id: String, checkpoint_uuid: String, cwd: String) -> Result<String, String> {
+async fn rewind_files(
+    session_id: String,
+    checkpoint_uuid: String,
+    cwd: String,
+) -> Result<String, String> {
     // P1-1: Validate session_id and checkpoint_uuid look like UUIDs (hex + hyphens only)
     fn is_uuid_like(s: &str) -> bool {
         s.len() >= 32 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
@@ -3434,23 +3808,27 @@ async fn rewind_files(session_id: String, checkpoint_uuid: String, cwd: String) 
         return Err(format!("Invalid session_id format: {}", session_id));
     }
     if !is_uuid_like(&checkpoint_uuid) {
-        return Err(format!("Invalid checkpoint_uuid format: {}", checkpoint_uuid));
+        return Err(format!(
+            "Invalid checkpoint_uuid format: {}",
+            checkpoint_uuid
+        ));
     }
 
     let claude_bin = find_claude_binary().unwrap_or_else(|| {
         #[cfg(target_os = "windows")]
-        { "claude.cmd".to_string() }
+        {
+            "claude.cmd".to_string()
+        }
         #[cfg(not(target_os = "windows"))]
-        { "claude".to_string() }
+        {
+            "claude".to_string()
+        }
     });
 
     let enriched_path = build_enriched_path();
 
     let output = tokio::process::Command::new(&claude_bin)
-        .args(&[
-            "--resume", &session_id,
-            "--rewind-files", &checkpoint_uuid,
-        ])
+        .args(&["--resume", &session_id, "--rewind-files", &checkpoint_uuid])
         .current_dir(&cwd)
         .env("PATH", &enriched_path)
         .env("CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING", "1")
@@ -3489,11 +3867,24 @@ async fn run_claude_command(subcommand: String, cwd: Option<String>) -> Result<S
         return Err(format!("Claude subcommand '{}' not allowed", subcommand));
     }
 
-    let binary = find_claude_binary()
-        .ok_or_else(|| "Claude CLI not found".to_string())?;
+    let binary = find_claude_binary().ok_or_else(|| "Claude CLI not found".to_string())?;
     let enriched_path = build_enriched_path();
-    let mut cmd = Command::new(&binary);
-    cmd.arg(&subcommand);
+    #[cfg(target_os = "windows")]
+    let mut cmd = if claude_needs_cmd_wrapper(&binary) {
+        let mut c = Command::new("cmd");
+        c.arg("/C").arg(&binary).arg(&subcommand);
+        c
+    } else {
+        let mut c = Command::new(&binary);
+        c.arg(&subcommand);
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut c = Command::new(&binary);
+        c.arg(&subcommand);
+        c
+    };
     cmd.env("PATH", &enriched_path);
     cmd.env_remove("CLAUDECODE");
     cmd.stdin(Stdio::null());
@@ -3510,7 +3901,11 @@ async fn run_claude_command(subcommand: String, cwd: Option<String>) -> Result<S
     let stdout = strip_ansi(&String::from_utf8_lossy(&output.stdout));
     let stderr = strip_ansi(&String::from_utf8_lossy(&output.stderr));
     if output.status.success() {
-        let combined = if stderr.is_empty() { stdout } else { format!("{}\n{}", stdout, stderr) };
+        let combined = if stderr.is_empty() {
+            stdout
+        } else {
+            format!("{}\n{}", stdout, stderr)
+        };
         Ok(combined.trim().to_string())
     } else {
         let combined = format!("{}\n{}", stdout, stderr);
@@ -3550,15 +3945,28 @@ async fn check_claude_cli() -> Result<CliStatus, String> {
                 match tokio::time::timeout(std::time::Duration::from_secs(5), fut).await {
                     Ok(r) => r,
                     Err(_) => {
-                        eprintln!("[check_claude_cli] --version timed out for '{}', trying fallback...", path);
+                        eprintln!(
+                            "[check_claude_cli] --version timed out for '{}', trying fallback...",
+                            path
+                        );
                         let fallback = find_claude_binary_skip_app_local();
                         let git_bash_missing = find_git_bash().is_none();
                         return match fallback {
                             Some(alt_path) => {
                                 eprintln!("[check_claude_cli] fallback found: {}", alt_path);
-                                Ok(CliStatus { installed: true, path: Some(alt_path), version: None, git_bash_missing })
+                                Ok(CliStatus {
+                                    installed: true,
+                                    path: Some(alt_path),
+                                    version: None,
+                                    git_bash_missing,
+                                })
                             }
-                            None => Ok(CliStatus { installed: false, path: None, version: None, git_bash_missing: false }),
+                            None => Ok(CliStatus {
+                                installed: false,
+                                path: None,
+                                version: None,
+                                git_bash_missing: false,
+                            }),
                         };
                     }
                 }
@@ -3575,27 +3983,43 @@ async fn check_claude_cli() -> Result<CliStatus, String> {
             {
                 Ok(r) => r,
                 Err(_) => {
-                    eprintln!("[check_claude_cli] --version timed out for '{}', trying fallback...", path);
+                    eprintln!(
+                        "[check_claude_cli] --version timed out for '{}', trying fallback...",
+                        path
+                    );
                     // The app-local binary is hanging; try to find an alternative via system PATH
                     let fallback = find_claude_binary_skip_app_local();
-                    #[cfg(target_os = "windows")]
-                    let git_bash_missing = find_git_bash().is_none();
-                    #[cfg(not(target_os = "windows"))]
                     let git_bash_missing = false;
                     return match fallback {
                         Some(alt_path) => {
                             eprintln!("[check_claude_cli] fallback found: {}", alt_path);
-                            Ok(CliStatus { installed: true, path: Some(alt_path), version: None, git_bash_missing })
+                            Ok(CliStatus {
+                                installed: true,
+                                path: Some(alt_path),
+                                version: None,
+                                git_bash_missing,
+                            })
                         }
-                        None => Ok(CliStatus { installed: false, path: None, version: None, git_bash_missing: false }),
+                        None => Ok(CliStatus {
+                            installed: false,
+                            path: None,
+                            version: None,
+                            git_bash_missing: false,
+                        }),
                     };
                 }
             };
 
             let version = match output_result {
                 Ok(output) if output.status.success() => {
-                    let raw = strip_ansi(&String::from_utf8_lossy(&output.stdout)).trim().to_string();
-                    if raw.is_empty() { None } else { Some(raw) }
+                    let raw = strip_ansi(&String::from_utf8_lossy(&output.stdout))
+                        .trim()
+                        .to_string();
+                    if raw.is_empty() {
+                        None
+                    } else {
+                        Some(raw)
+                    }
                 }
                 Ok(_) => None,
                 Err(ref e) => {
@@ -3649,9 +4073,19 @@ async fn check_claude_cli() -> Result<CliStatus, String> {
             #[cfg(not(target_os = "windows"))]
             let git_bash_missing = false;
 
-            Ok(CliStatus { installed: true, path: Some(path), version, git_bash_missing })
+            Ok(CliStatus {
+                installed: true,
+                path: Some(path),
+                version,
+                git_bash_missing,
+            })
         }
-        None => Ok(CliStatus { installed: false, path: None, version: None, git_bash_missing: false }),
+        None => Ok(CliStatus {
+            installed: false,
+            path: None,
+            version: None,
+            git_bash_missing: false,
+        }),
     }
 }
 
@@ -3677,7 +4111,14 @@ async fn detect_china_network() -> bool {
         .await
         .is_err();
 
-    eprintln!("Network detection: {}", if is_china { "China (Google unreachable)" } else { "Global (Google reachable)" });
+    eprintln!(
+        "Network detection: {}",
+        if is_china {
+            "China (Google unreachable)"
+        } else {
+            "Global (Google reachable)"
+        }
+    );
     is_china
 }
 
@@ -3694,9 +4135,12 @@ async fn is_china_network() -> bool {
 /// Install Claude CLI via npm. Supports system npm or local Node.js npm.
 /// Uses --prefix to install into app-local directory when using local Node.js.
 async fn install_cli_via_npm(app: &AppHandle, china: bool) -> Result<(), String> {
-    let _ = app.emit("setup:download:progress", serde_json::json!({
-        "downloaded": 0, "total": 0, "percent": 0, "phase": "npm_fallback"
-    }));
+    let _ = app.emit(
+        "setup:download:progress",
+        serde_json::json!({
+            "downloaded": 0, "total": 0, "percent": 0, "phase": "npm_fallback"
+        }),
+    );
 
     // Determine npm path: local Node.js takes priority, then system npm
     let npm_path = if let Some(local_bin) = get_local_node_bin() {
@@ -3745,12 +4189,19 @@ async fn install_cli_via_npm(app: &AppHandle, china: bool) -> Result<(), String>
 
     let mut last_err = String::new();
     for registry in &registries {
-        eprintln!("Trying npm install with registry: {} (prefix: {}, cache: {})",
-            registry, prefix_dir.display(), cache_dir.display());
+        eprintln!(
+            "Trying npm install with registry: {} (prefix: {}, cache: {})",
+            registry,
+            prefix_dir.display(),
+            cache_dir.display()
+        );
 
-        let _ = app.emit("setup:download:progress", serde_json::json!({
-            "downloaded": 0, "total": 0, "percent": 50, "phase": "npm_fallback"
-        }));
+        let _ = app.emit(
+            "setup:download:progress",
+            serde_json::json!({
+                "downloaded": 0, "total": 0, "percent": 50, "phase": "npm_fallback"
+            }),
+        );
 
         // Build args — always use --prefix and --cache for isolation
         let args: Vec<String> = vec![
@@ -3786,9 +4237,12 @@ async fn install_cli_via_npm(app: &AppHandle, china: bool) -> Result<(), String>
         match result {
             Ok(Ok(output)) if output.status.success() => {
                 eprintln!("npm install succeeded via {}", registry);
-                let _ = app.emit("setup:download:progress", serde_json::json!({
-                    "downloaded": 0, "total": 0, "percent": 100, "phase": "installing"
-                }));
+                let _ = app.emit(
+                    "setup:download:progress",
+                    serde_json::json!({
+                        "downloaded": 0, "total": 0, "percent": 100, "phase": "installing"
+                    }),
+                );
                 return Ok(());
             }
             Ok(Ok(output)) => {
@@ -3818,12 +4272,21 @@ async fn install_cli_via_npm(app: &AppHandle, china: bool) -> Result<(), String>
 /// 3. Install CLI via npm with region-appropriate registry mirrors
 #[tauri::command]
 async fn install_claude_cli(app: AppHandle) -> Result<(), String> {
-    // Skip installation if CLI already exists on system
-    if find_claude_binary().is_some() {
+    // Skip installation if CLI already exists on system.
+    // On Windows, still continue when git-bash is missing because reinstall is the repair path.
+    let existing_cli = find_claude_binary();
+    #[cfg(target_os = "windows")]
+    let can_skip_install = existing_cli.is_some() && find_git_bash().is_some();
+    #[cfg(not(target_os = "windows"))]
+    let can_skip_install = existing_cli.is_some();
+    if can_skip_install {
         eprintln!("CLI already found on system, skipping installation");
-        let _ = app.emit("setup:download:progress", serde_json::json!({
-            "downloaded": 0, "total": 0, "percent": 100, "phase": "complete"
-        }));
+        let _ = app.emit(
+            "setup:download:progress",
+            serde_json::json!({
+                "downloaded": 0, "total": 0, "percent": 100, "phase": "complete"
+            }),
+        );
         return Ok(());
     }
 
@@ -3858,14 +4321,17 @@ async fn install_claude_cli(app: AppHandle) -> Result<(), String> {
     if !has_npm {
         eprintln!("npm not available, deploying Node.js locally...");
         install_node_env_inner(&app, china).await.map_err(|e| {
-            format!("Failed to install Node.js runtime: {}. Please install Node.js manually.", e)
+            format!(
+                "Failed to install Node.js runtime: {}. Please install Node.js manually.",
+                e
+            )
         })?;
     }
 
     // Phase 3: Install CLI via npm
-    install_cli_via_npm(&app, china).await.map_err(|npm_err| {
-        format!("CLI installation failed via npm: {}", npm_err)
-    })?;
+    install_cli_via_npm(&app, china)
+        .await
+        .map_err(|npm_err| format!("CLI installation failed via npm: {}", npm_err))?;
 
     eprintln!("CLI installed via npm");
     finalize_cli_install_paths(&app);
@@ -3876,7 +4342,10 @@ async fn install_claude_cli(app: AppHandle) -> Result<(), String> {
 /// Appends an export line to the first existing profile file (.zshrc, .bashrc, etc.).
 #[cfg(not(target_os = "windows"))]
 fn inject_unix_shell_path(dir: &str) {
-    let home = match dirs::home_dir() { Some(h) => h, None => return };
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return,
+    };
     let export_line = format!("export PATH=\"{}:$PATH\"", dir);
     let marker = "# Added by TOKENICODE";
     let block = format!("\n{}\n{}\n", marker, export_line);
@@ -3891,7 +4360,9 @@ fn inject_unix_shell_path(dir: &str) {
     // Check if already injected
     for p in &profiles {
         if let Ok(c) = std::fs::read_to_string(p) {
-            if c.contains(&export_line) { return; }
+            if c.contains(&export_line) {
+                return;
+            }
         }
     }
 
@@ -3993,15 +4464,21 @@ fn finalize_cli_install_paths(app: &AppHandle) {
 
     #[cfg(not(target_os = "windows"))]
     {
+        if let Some(node_bin) = get_local_node_bin() {
+            inject_unix_shell_path(&node_bin.to_string_lossy());
+        }
         if let Some(npm_bin) = get_npm_global_bin() {
             inject_unix_shell_path(&npm_bin.to_string_lossy());
         }
         let _ = app;
     }
 
-    let _ = app.emit("setup:download:progress", serde_json::json!({
-        "downloaded": 0, "total": 0, "percent": 100, "phase": "complete"
-    }));
+    let _ = app.emit(
+        "setup:download:progress",
+        serde_json::json!({
+            "downloaded": 0, "total": 0, "percent": 100, "phase": "complete"
+        }),
+    );
 }
 
 // ─── Node.js local deployment ──────────────────────────────────────────
@@ -4061,7 +4538,11 @@ fn get_npm_global_bin() -> Option<std::path::PathBuf> {
     let bin = dir.clone();
     #[cfg(not(target_os = "windows"))]
     let bin = dir.join("bin");
-    if bin.exists() { Some(bin) } else { None }
+    if bin.exists() {
+        Some(bin)
+    } else {
+        None
+    }
 }
 
 /// Determine Node.js archive filename and format for the current platform.
@@ -4069,10 +4550,10 @@ fn get_node_archive_info() -> Result<(String, &'static str), String> {
     // Returns (filename, extension)
     match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => Ok((format!("node-{}-darwin-arm64", NODE_LTS_VERSION), "tar.gz")),
-        ("macos", "x86_64")  => Ok((format!("node-{}-darwin-x64", NODE_LTS_VERSION), "tar.gz")),
+        ("macos", "x86_64") => Ok((format!("node-{}-darwin-x64", NODE_LTS_VERSION), "tar.gz")),
         ("windows", "x86_64") => Ok((format!("node-{}-win-x64", NODE_LTS_VERSION), "zip")),
         ("windows", "aarch64") => Ok((format!("node-{}-win-arm64", NODE_LTS_VERSION), "zip")),
-        ("linux", "x86_64")  => Ok((format!("node-{}-linux-x64", NODE_LTS_VERSION), "tar.gz")),
+        ("linux", "x86_64") => Ok((format!("node-{}-linux-x64", NODE_LTS_VERSION), "tar.gz")),
         ("linux", "aarch64") => Ok((format!("node-{}-linux-arm64", NODE_LTS_VERSION), "tar.gz")),
         (os, arch) => Err(format!("Unsupported platform for Node.js: {}-{}", os, arch)),
     }
@@ -4143,15 +4624,18 @@ async fn check_node_env() -> Result<NodeEnvStatus, String> {
 
     // 1. Check local Node.js first
     if let Some(local_bin) = get_local_node_bin() {
-        let node_path = local_bin.join(if cfg!(target_os = "windows") { "node.exe" } else { "node" });
+        let node_path = local_bin.join(if cfg!(target_os = "windows") {
+            "node.exe"
+        } else {
+            "node"
+        });
         let mut node_cmd = Command::new(&node_path);
         node_cmd.arg("--version").stdin(Stdio::null());
         #[cfg(target_os = "windows")]
         node_cmd.creation_flags(0x08000000);
-        if let Ok(Ok(output)) = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            node_cmd.output(),
-        ).await {
+        if let Ok(Ok(output)) =
+            tokio::time::timeout(std::time::Duration::from_secs(10), node_cmd.output()).await
+        {
             if output.status.success() {
                 let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
                 return Ok(NodeEnvStatus {
@@ -4221,7 +4705,8 @@ async fn install_node_env_inner(app: &AppHandle, china: bool) -> Result<(), Stri
     let client = build_smart_http_client(
         std::time::Duration::from_secs(10),
         std::time::Duration::from_secs(120),
-    ).await;
+    )
+    .await;
 
     // Network-aware source ordering
     let sources: Vec<String> = if china {
@@ -4242,9 +4727,12 @@ async fn install_node_env_inner(app: &AppHandle, china: bool) -> Result<(), Stri
 
     for (i, url) in sources.iter().enumerate() {
         eprintln!("Trying Node.js download: {}", url);
-        let _ = app.emit("setup:download:progress", serde_json::json!({
-            "downloaded": 0, "total": 0, "percent": 0, "phase": "node_downloading"
-        }));
+        let _ = app.emit(
+            "setup:download:progress",
+            serde_json::json!({
+                "downloaded": 0, "total": 0, "percent": 0, "phase": "node_downloading"
+            }),
+        );
 
         match download_with_progress(app, &client, url, "node_downloading").await {
             Ok(bytes) => {
@@ -4259,12 +4747,16 @@ async fn install_node_env_inner(app: &AppHandle, china: bool) -> Result<(), Stri
         }
     }
 
-    let bytes = archive_bytes.ok_or_else(|| format!("All Node.js download sources failed: {}", last_err))?;
+    let bytes = archive_bytes
+        .ok_or_else(|| format!("All Node.js download sources failed: {}", last_err))?;
 
     // Extract
-    let _ = app.emit("setup:download:progress", serde_json::json!({
-        "downloaded": 0, "total": 0, "percent": 85, "phase": "node_extracting"
-    }));
+    let _ = app.emit(
+        "setup:download:progress",
+        serde_json::json!({
+            "downloaded": 0, "total": 0, "percent": 85, "phase": "node_extracting"
+        }),
+    );
 
     extract_node_archive(&bytes, ext, &archive_name, &install_dir)?;
 
@@ -4285,11 +4777,17 @@ async fn install_node_env_inner(app: &AppHandle, china: bool) -> Result<(), Stri
         }
     }
 
-    let _ = app.emit("setup:download:progress", serde_json::json!({
-        "downloaded": 0, "total": 0, "percent": 100, "phase": "node_complete"
-    }));
+    let _ = app.emit(
+        "setup:download:progress",
+        serde_json::json!({
+            "downloaded": 0, "total": 0, "percent": 100, "phase": "node_complete"
+        }),
+    );
 
-    eprintln!("Node.js {} installed to {:?}", NODE_LTS_VERSION, install_dir);
+    eprintln!(
+        "Node.js {} installed to {:?}",
+        NODE_LTS_VERSION, install_dir
+    );
     Ok(())
 }
 
@@ -4344,7 +4842,10 @@ async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Result<(), Stri
         "aarch64" => "arm64",
         _ => "64", // x86_64 and fallback
     };
-    let filename = format!("PortableGit-{}-{}-bit.7z.exe", GIT_PORTABLE_VERSION, arch_suffix);
+    let filename = format!(
+        "PortableGit-{}-{}-bit.7z.exe",
+        GIT_PORTABLE_VERSION, arch_suffix
+    );
 
     let sources: Vec<String> = if china {
         vec![
@@ -4362,18 +4863,22 @@ async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Result<(), Stri
     };
 
     let client = build_smart_http_client(
-        std::time::Duration::from_secs(15),  // Fast failover between mirrors
+        std::time::Duration::from_secs(15), // Fast failover between mirrors
         std::time::Duration::from_secs(300), // 5 min for large download
-    ).await;
+    )
+    .await;
 
     let mut last_err = String::new();
     let mut archive_bytes: Option<Vec<u8>> = None;
 
     for url in &sources {
         eprintln!("Trying PortableGit download: {}", url);
-        let _ = app.emit("setup:download:progress", serde_json::json!({
-            "downloaded": 0, "total": 0, "percent": 0, "phase": "git_downloading"
-        }));
+        let _ = app.emit(
+            "setup:download:progress",
+            serde_json::json!({
+                "downloaded": 0, "total": 0, "percent": 0, "phase": "git_downloading"
+            }),
+        );
 
         match download_with_progress(app, &client, url, "git_downloading").await {
             Ok(bytes) => {
@@ -4388,17 +4893,20 @@ async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Result<(), Stri
         }
     }
 
-    let bytes = archive_bytes
-        .ok_or_else(|| format!("All Git download sources failed: {}", last_err))?;
+    let bytes =
+        archive_bytes.ok_or_else(|| format!("All Git download sources failed: {}", last_err))?;
 
     // Write the .7z.exe to a temp file
     let temp_path = install_dir.join(&filename);
     std::fs::write(&temp_path, &bytes)
         .map_err(|e| format!("Failed to write PortableGit archive: {}", e))?;
 
-    let _ = app.emit("setup:download:progress", serde_json::json!({
-        "downloaded": 0, "total": 0, "percent": 85, "phase": "git_extracting"
-    }));
+    let _ = app.emit(
+        "setup:download:progress",
+        serde_json::json!({
+            "downloaded": 0, "total": 0, "percent": 85, "phase": "git_extracting"
+        }),
+    );
 
     // Run the self-extracting archive silently: -o<dir> -y
     eprintln!("Extracting PortableGit to {:?}...", install_dir);
@@ -4409,7 +4917,8 @@ async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Result<(), Stri
             .stdin(Stdio::null())
             .creation_flags(0x08000000) // CREATE_NO_WINDOW
             .output(),
-    ).await;
+    )
+    .await;
 
     // Clean up the downloaded archive regardless of result
     let _ = std::fs::remove_file(&temp_path);
@@ -4420,7 +4929,10 @@ async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Result<(), Stri
         }
         Ok(Ok(output)) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("PortableGit extraction failed (exit {}): {}", output.status, stderr));
+            return Err(format!(
+                "PortableGit extraction failed (exit {}): {}",
+                output.status, stderr
+            ));
         }
         Ok(Err(e)) => {
             return Err(format!("Failed to run PortableGit extractor: {}", e));
@@ -4436,9 +4948,12 @@ async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Result<(), Stri
         return Err("bash.exe not found after PortableGit extraction".to_string());
     }
 
-    let _ = app.emit("setup:download:progress", serde_json::json!({
-        "downloaded": 0, "total": 0, "percent": 100, "phase": "git_complete"
-    }));
+    let _ = app.emit(
+        "setup:download:progress",
+        serde_json::json!({
+            "downloaded": 0, "total": 0, "percent": 100, "phase": "git_complete"
+        }),
+    );
 
     eprintln!("PortableGit installed to {:?}", install_dir);
     Ok(())
@@ -4451,8 +4966,10 @@ async fn download_with_progress(
     url: &str,
     phase: &str,
 ) -> Result<Vec<u8>, String> {
-    let resp = client.get(url)
-        .send().await
+    let resp = client
+        .get(url)
+        .send()
+        .await
         .map_err(|e| format!("Request failed: {}", e))?;
 
     if !resp.status().is_success() {
@@ -4469,10 +4986,17 @@ async fn download_with_progress(
         bytes.extend_from_slice(&chunk);
         downloaded += chunk.len() as u64;
 
-        let percent = if total > 0 { (downloaded * 80 / total) as u8 } else { 0 };
-        let _ = app.emit("setup:download:progress", serde_json::json!({
-            "downloaded": downloaded, "total": total, "percent": percent, "phase": phase
-        }));
+        let percent = if total > 0 {
+            (downloaded * 80 / total) as u8
+        } else {
+            0
+        };
+        let _ = app.emit(
+            "setup:download:progress",
+            serde_json::json!({
+                "downloaded": downloaded, "total": total, "percent": percent, "phase": phase
+            }),
+        );
     }
 
     Ok(bytes)
@@ -4497,7 +5021,8 @@ fn extract_node_archive(
                 let path = entry.path().map_err(|e| format!("path error: {}", e))?;
 
                 // Strip the top-level directory (e.g., "node-v22.22.0-darwin-arm64/bin/node" -> "bin/node")
-                let stripped: std::path::PathBuf = path.components()
+                let stripped: std::path::PathBuf = path
+                    .components()
                     .skip(1) // skip "node-v22.22.0-platform/"
                     .collect();
 
@@ -4510,18 +5035,20 @@ fn extract_node_archive(
                     let _ = std::fs::create_dir_all(parent);
                 }
 
-                entry.unpack(&target)
+                entry
+                    .unpack(&target)
                     .map_err(|e| format!("unpack error for {:?}: {}", stripped, e))?;
             }
             Ok(())
         }
         "zip" => {
             let reader = std::io::Cursor::new(data);
-            let mut archive = zip::ZipArchive::new(reader)
-                .map_err(|e| format!("zip open error: {}", e))?;
+            let mut archive =
+                zip::ZipArchive::new(reader).map_err(|e| format!("zip open error: {}", e))?;
 
             for i in 0..archive.len() {
-                let mut file = archive.by_index(i)
+                let mut file = archive
+                    .by_index(i)
                     .map_err(|e| format!("zip entry error: {}", e))?;
 
                 let name = file.name().to_string();
@@ -4562,8 +5089,9 @@ async fn start_claude_login(app: AppHandle) -> Result<(), String> {
         Ok(())
     }
 
-    let claude_bin = find_claude_binary()
-        .ok_or_else(|| "Claude CLI not found. Please install it first via the Setup Wizard.".to_string())?;
+    let claude_bin = find_claude_binary().ok_or_else(|| {
+        "Claude CLI not found. Please install it first via the Setup Wizard.".to_string()
+    })?;
     let enriched_path = build_enriched_path();
 
     // On Windows, .cmd/.bat files must be launched via cmd /C (same logic as start_session)
@@ -4571,7 +5099,9 @@ async fn start_claude_login(app: AppHandle) -> Result<(), String> {
     let mut child = {
         let needs_cmd = claude_bin.ends_with(".cmd")
             || claude_bin.ends_with(".bat")
-            || (!claude_bin.contains('\\') && !claude_bin.contains('/') && !claude_bin.contains('.'));
+            || (!claude_bin.contains('\\')
+                && !claude_bin.contains('/')
+                && !claude_bin.contains('.'));
         let mut cmd = if needs_cmd {
             let mut c = Command::new("cmd");
             c.arg("/C").arg(&claude_bin);
@@ -4631,7 +5161,9 @@ async fn start_claude_login(app: AppHandle) -> Result<(), String> {
         }
     });
 
-    let status = child.wait().await
+    let status = child
+        .wait()
+        .await
         .map_err(|e| format!("Login process error: {}", e))?;
 
     let _ = stdout_handle.await;
@@ -4661,9 +5193,13 @@ struct AuthStatus {
 async fn check_claude_auth() -> Result<AuthStatus, String> {
     let claude_bin = find_claude_binary().unwrap_or_else(|| {
         #[cfg(target_os = "windows")]
-        { "claude.cmd".to_string() }
+        {
+            "claude.cmd".to_string()
+        }
         #[cfg(not(target_os = "windows"))]
-        { "claude".to_string() }
+        {
+            "claude".to_string()
+        }
     });
     let enriched_path = build_enriched_path();
 
@@ -4683,7 +5219,10 @@ async fn check_claude_auth() -> Result<AuthStatus, String> {
                                 .unwrap_or(false)
                         });
                     if has_token {
-                        return Ok(AuthStatus { authenticated: true, unknown: false });
+                        return Ok(AuthStatus {
+                            authenticated: true,
+                            unknown: false,
+                        });
                     }
                 }
                 // JSON invalid or no token found — fall through to claude doctor
@@ -4692,22 +5231,34 @@ async fn check_claude_auth() -> Result<AuthStatus, String> {
         // Also check .claude.json (older format)
         let alt_path = std::path::Path::new(&home).join(".claude.json");
         if alt_path.exists() {
-            return Ok(AuthStatus { authenticated: true, unknown: false });
+            return Ok(AuthStatus {
+                authenticated: true,
+                unknown: false,
+            });
         }
     }
 
     // Fallback: run `claude doctor` with a shorter timeout
-    let mut cmd = Command::new(&claude_bin);
-    cmd.args(["doctor"])
-        .env("PATH", &enriched_path)
-        .env_remove("CLAUDECODE");
+    #[cfg(target_os = "windows")]
+    let mut cmd = if claude_needs_cmd_wrapper(&claude_bin) {
+        let mut c = Command::new("cmd");
+        c.args(["/C", &claude_bin, "doctor"]);
+        c
+    } else {
+        let mut c = Command::new(&claude_bin);
+        c.arg("doctor");
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut c = Command::new(&claude_bin);
+        c.arg("doctor");
+        c
+    };
+    cmd.env("PATH", &enriched_path).env_remove("CLAUDECODE");
     #[cfg(target_os = "windows")]
     cmd.creation_flags(0x08000000);
-    let result = tokio::time::timeout(
-        std::time::Duration::from_secs(8),
-        cmd.output(),
-    )
-    .await;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(8), cmd.output()).await;
 
     match result {
         Ok(Ok(output)) => {
@@ -4729,7 +5280,10 @@ async fn check_claude_auth() -> Result<AuthStatus, String> {
         Ok(Err(e)) => Err(format!("Failed to run auth check: {}", e)),
         Err(_) => {
             // Timeout — cannot determine auth status
-            Ok(AuthStatus { authenticated: false, unknown: true })
+            Ok(AuthStatus {
+                authenticated: false,
+                unknown: true,
+            })
         }
     }
 }
@@ -4749,8 +5303,7 @@ async fn load_custom_previews() -> Result<Value, String> {
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read session names: {}", e))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse session names: {}", e))
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse session names: {}", e))
 }
 
 /// Save custom session display names to disk.
@@ -4759,8 +5312,7 @@ async fn save_custom_previews(data: Value) -> Result<(), String> {
     let path = session_names_path()?;
     let content = serde_json::to_string_pretty(&data)
         .map_err(|e| format!("Failed to serialize session names: {}", e))?;
-    std::fs::write(&path, content)
-        .map_err(|e| format!("Failed to write session names: {}", e))
+    std::fs::write(&path, content).map_err(|e| format!("Failed to write session names: {}", e))
 }
 
 fn tokenicode_data_path(filename: &str) -> Result<std::path::PathBuf, String> {
@@ -4782,8 +5334,7 @@ async fn load_pinned_sessions() -> Result<Value, String> {
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read pinned sessions: {}", e))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse pinned sessions: {}", e))
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse pinned sessions: {}", e))
 }
 
 /// Save pinned session IDs to disk.
@@ -4792,8 +5343,7 @@ async fn save_pinned_sessions(data: Value) -> Result<(), String> {
     let path = tokenicode_data_path("pinned.json")?;
     let content = serde_json::to_string_pretty(&data)
         .map_err(|e| format!("Failed to serialize pinned sessions: {}", e))?;
-    std::fs::write(&path, content)
-        .map_err(|e| format!("Failed to write pinned sessions: {}", e))
+    std::fs::write(&path, content).map_err(|e| format!("Failed to write pinned sessions: {}", e))
 }
 
 /// Load archived session IDs from disk.
@@ -4805,8 +5355,7 @@ async fn load_archived_sessions() -> Result<Value, String> {
     }
     let content = std::fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read archived sessions: {}", e))?;
-    serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse archived sessions: {}", e))
+    serde_json::from_str(&content).map_err(|e| format!("Failed to parse archived sessions: {}", e))
 }
 
 /// Save archived session IDs to disk.
@@ -4815,8 +5364,7 @@ async fn save_archived_sessions(data: Value) -> Result<(), String> {
     let path = tokenicode_data_path("archived.json")?;
     let content = serde_json::to_string_pretty(&data)
         .map_err(|e| format!("Failed to serialize archived sessions: {}", e))?;
-    std::fs::write(&path, content)
-        .map_err(|e| format!("Failed to write archived sessions: {}", e))
+    std::fs::write(&path, content).map_err(|e| format!("Failed to write archived sessions: {}", e))
 }
 
 /// Generate a short AI title for a session by spawning a separate Claude CLI process.
@@ -4830,7 +5378,9 @@ async fn generate_session_title(
 ) -> Result<String, String> {
     // Safe UTF-8 truncation (don't slice mid-character)
     fn safe_truncate(s: &str, max_bytes: usize) -> &str {
-        if s.len() <= max_bytes { return s; }
+        if s.len() <= max_bytes {
+            return s;
+        }
         let mut end = max_bytes;
         while end > 0 && !s.is_char_boundary(end) {
             end -= 1;
@@ -4852,37 +5402,46 @@ async fn generate_session_title(
         // Find haiku tier mapping from provider
         let providers_file = load_providers()?;
         let provider = providers_file.providers.iter().find(|p| p.id == *pid);
-        let haiku_model = provider
-            .and_then(|p| p.model_mappings.iter()
+        let haiku_model = provider.and_then(|p| {
+            p.model_mappings
+                .iter()
                 .find(|m| m.tier == "haiku" && !m.provider_model.is_empty())
-                .map(|m| m.provider_model.clone()));
+                .map(|m| m.provider_model.clone())
+        });
         match haiku_model {
             Some(m) => (env, keys, m),
             None => return Err("SKIP: no haiku mapping for provider".to_string()),
         }
     } else {
-        (HashMap::new(), vec![], "claude-haiku-4-5-20251001".to_string())
+        (
+            HashMap::new(),
+            vec![],
+            "claude-haiku-4-5-20251001".to_string(),
+        )
     };
 
     // Resolve claude binary
-    let claude_bin = find_claude_binary()
-        .ok_or_else(|| "Claude CLI not found".to_string())?;
+    let claude_bin = find_claude_binary().ok_or_else(|| "Claude CLI not found".to_string())?;
 
     let enriched_path = build_enriched_path();
 
     // Spawn a one-shot CLI process: -p for single prompt, --output-format json for structured output
     let args = vec![
-        "-p".to_string(), prompt,
-        "--model".to_string(), model_name,
-        "--output-format".to_string(), "json".to_string(),
-        "--max-turns".to_string(), "1".to_string(),
+        "-p".to_string(),
+        prompt,
+        "--model".to_string(),
+        model_name,
+        "--output-format".to_string(),
+        "json".to_string(),
+        "--max-turns".to_string(),
+        "1".to_string(),
         "--dangerously-skip-permissions".to_string(),
     ];
 
     let mut cmd = tokio::process::Command::new(&claude_bin);
     cmd.args(&args)
         .env("PATH", &enriched_path)
-        .env_remove("CLAUDECODE")       // Allow nested CLI launch
+        .env_remove("CLAUDECODE") // Allow nested CLI launch
         .env_remove("CLAUDE_CODE_ENTRY") // Remove any other nesting guards
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -4906,7 +5465,12 @@ async fn generate_session_title(
         }
     }
 
-    let output = cmd.spawn()
+    // Suppress console window on Windows
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+
+    let output = cmd
+        .spawn()
         .map_err(|e| format!("Failed to spawn claude for title gen: {}", e))?
         .wait_with_output()
         .await
@@ -4914,7 +5478,10 @@ async fn generate_session_title(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Title gen process failed: {}", stderr.chars().take(200).collect::<String>()));
+        return Err(format!(
+            "Title gen process failed: {}",
+            stderr.chars().take(200).collect::<String>()
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -4922,7 +5489,8 @@ async fn generate_session_title(
     // Parse JSON output — Claude CLI --output-format json returns:
     // { "type": "result", "result": "the title text", ... }
     if let Ok(json) = serde_json::from_str::<Value>(stdout.trim()) {
-        let title = json.get("result")
+        let title = json
+            .get("result")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .trim()
@@ -4948,17 +5516,19 @@ async fn generate_session_title(
 /// On Windows: opens cmd.exe with enriched PATH.
 #[tauri::command]
 async fn open_terminal_login() -> Result<(), String> {
-    let claude_bin = find_claude_binary()
-        .ok_or_else(|| "Claude CLI not found. Please install it first via the Setup Wizard.".to_string())?;
+    let claude_bin = find_claude_binary().ok_or_else(|| {
+        "Claude CLI not found. Please install it first via the Setup Wizard.".to_string()
+    })?;
 
     #[cfg(target_os = "macos")]
     {
+        let command = format!("{} login", shell_single_quote(&claude_bin));
         let script = format!(
             r#"tell application "Terminal"
     activate
-    do script "{} login"
+    do script "{}"
 end tell"#,
-            claude_bin
+            command.replace('\\', "\\\\").replace('"', "\\\"")
         );
         std::process::Command::new("osascript")
             .args(["-e", &script])
@@ -4969,7 +5539,7 @@ end tell"#,
     #[cfg(target_os = "linux")]
     {
         // Try common terminal emulators in order of preference
-        let xterm_cmd = format!("{} login", claude_bin);
+        let xterm_cmd = format!("{} login", shell_single_quote(&claude_bin));
         let terminals = [
             ("gnome-terminal", vec!["--", &claude_bin, "login"]),
             ("konsole", vec!["-e", &claude_bin, "login"]),
@@ -5020,32 +5590,31 @@ async fn set_dock_icon(app: AppHandle, png_base64: String) -> Result<(), String>
 
         // NSApplication APIs must be called on the main thread
         app.run_on_main_thread(move || {
-            objc::rc::autoreleasepool(|| {
-                unsafe {
-                    use objc::runtime::{Class, Object};
-                    use objc::msg_send;
-                    use objc::sel;
-                    use objc::sel_impl;
+            objc::rc::autoreleasepool(|| unsafe {
+                use objc::msg_send;
+                use objc::runtime::{Class, Object};
+                use objc::sel;
+                use objc::sel_impl;
 
-                    let nsdata_class = Class::get("NSData").unwrap();
-                    let nsdata: *mut Object = msg_send![nsdata_class, alloc];
-                    let nsdata: *mut Object = msg_send![nsdata,
-                        initWithBytes: data.as_ptr()
-                        length: data.len()
-                    ];
+                let nsdata_class = Class::get("NSData").unwrap();
+                let nsdata: *mut Object = msg_send![nsdata_class, alloc];
+                let nsdata: *mut Object = msg_send![nsdata,
+                    initWithBytes: data.as_ptr()
+                    length: data.len()
+                ];
 
-                    let nsimage_class = Class::get("NSImage").unwrap();
-                    let nsimage: *mut Object = msg_send![nsimage_class, alloc];
-                    let nsimage: *mut Object = msg_send![nsimage, initWithData: nsdata];
+                let nsimage_class = Class::get("NSImage").unwrap();
+                let nsimage: *mut Object = msg_send![nsimage_class, alloc];
+                let nsimage: *mut Object = msg_send![nsimage, initWithData: nsdata];
 
-                    if !nsimage.is_null() {
-                        let nsapp_class = Class::get("NSApplication").unwrap();
-                        let nsapp: *mut Object = msg_send![nsapp_class, sharedApplication];
-                        let _: () = msg_send![nsapp, setApplicationIconImage: nsimage];
-                    }
+                if !nsimage.is_null() {
+                    let nsapp_class = Class::get("NSApplication").unwrap();
+                    let nsapp: *mut Object = msg_send![nsapp_class, sharedApplication];
+                    let _: () = msg_send![nsapp, setApplicationIconImage: nsimage];
                 }
             });
-        }).map_err(|e| format!("Failed to run on main thread: {}", e))?;
+        })
+        .map_err(|e| format!("Failed to run on main thread: {}", e))?;
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -5077,14 +5646,17 @@ pub fn run() {
                 for (k, v) in proxy_env {
                     if std::env::var(k).is_err() {
                         // SAFETY: called once during single-threaded setup
-                        unsafe { std::env::set_var(k, v); }
+                        unsafe {
+                            std::env::set_var(k, v);
+                        }
                     }
                 }
             }
 
             // Register updater plugin (desktop only)
             #[cfg(desktop)]
-            app.handle().plugin(tauri_plugin_updater::Builder::new().build())?;
+            app.handle()
+                .plugin(tauri_plugin_updater::Builder::new().build())?;
 
             #[cfg(not(desktop))]
             let _ = app;
@@ -5159,30 +5731,36 @@ pub fn run() {
 #[cfg(test)]
 mod decode_tests {
     use super::decode_project_name;
-    
+
     #[test]
     fn test_simple_path() {
         let result = decode_project_name("-Users-tinyzhuang-Documents-FocusZone");
         assert_eq!(result, "/Users/tinyzhuang/Documents/FocusZone");
     }
-    
+
     #[test]
     fn test_hyphenated_dir() {
         // ppt-maker exists on disk as a dir with hyphens in name
         let result = decode_project_name("-Users-tinyzhuang-Desktop-ppt-maker");
         assert_eq!(result, "/Users/tinyzhuang/Desktop/ppt-maker");
     }
-    
+
     #[test]
     fn test_hidden_dir_double_dash() {
         // FocusZone/.claude-worktrees/condescending-brown
         // "/" → "-", "." → empty part making "--"
-        let result = decode_project_name("-Users-tinyzhuang-Documents-FocusZone--claude-worktrees-condescending-brown");
+        let result = decode_project_name(
+            "-Users-tinyzhuang-Documents-FocusZone--claude-worktrees-condescending-brown",
+        );
         println!("Result: {}", result);
         // Should contain .claude somewhere
-        assert!(result.contains(".claude"), "Expected .claude in path, got: {}", result);
+        assert!(
+            result.contains(".claude"),
+            "Expected .claude in path, got: {}",
+            result
+        );
     }
-    
+
     #[test]
     fn test_nested_subdir() {
         let result = decode_project_name("-Users-tinyzhuang-Desktop-test-NiCode");

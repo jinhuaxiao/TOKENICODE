@@ -8,6 +8,32 @@ All notable changes to TOKENICODE will be documented in this file.
 
 ---
 
+## [Unreleased]
+
+---
+
+## [0.8.5] - 2026-03-06
+
+### Added
+
+- **隐藏文件开关** — 文件树标题栏新增眼睛按钮，一键切换隐藏/显示 dotfiles（`.git`、`.claude` 等），设置跨会话保留。
+- **更新日志分类显示** — 「更新说明」弹窗按新功能/修复/改进分组展示，更清晰。
+
+### Changed
+
+- **模型选择器显示真实模型名** — 当使用自定义 API Provider 且配置了模型映射时，模型选择器下拉菜单和底栏按钮显示映射后的真实模型名（如 `gpt-5.3-codex-medium`）而非 Claude 模型名。无 Provider 或使用 Anthropic 官方时保持原样。
+
+### Fixed
+
+- **Windows 新建对话弹出空白 CMD 窗口** — 新会话首轮对话后自动生成标题时，spawn CLI 进程缺少 `CREATE_NO_WINDOW` flag，导致 Windows 上弹出一个空白的 `cmd.exe` 窗口。不影响功能但视觉干扰。
+- **Windows 安装修复** — 缺少 git-bash 时重装不再被"已检测到 CLI"短路，正确走修复路径。
+- **Windows CLI 调用统一** — `run_claude_command` 和 `check_claude_auth` 统一 `cmd /C` 包装，`.cmd/.bat` 不再启动失败。
+- **Windows timeout 回退** — CLI 超时后正确回退到 PATH / Claude Desktop / scoop / nvm 等候选。
+- **Unix 终端 CLI 可用** — 自部署 Node 安装后自动写入 shell PATH，终端里 `claude` 命令不再找不到。
+- **终端登录路径安全** — `open_terminal_login` 对 CLI 路径做 shell quoting，带空格路径不再报错。
+
+---
+
 ## [0.8.3] - 2026-03-04
 
 ### Added

@@ -47,9 +47,13 @@ impl StdinManager {
         if let Some(stdin) = map.get_mut(id) {
             // Atomic write: message + newline in one call to prevent interleaving (P1-2 fix)
             let payload = format!("{}\n", message);
-            stdin.write_all(payload.as_bytes()).await
+            stdin
+                .write_all(payload.as_bytes())
+                .await
                 .map_err(|e| format!("Failed to write to stdin: {}", e))?;
-            stdin.flush().await
+            stdin
+                .flush()
+                .await
                 .map_err(|e| format!("Failed to flush stdin: {}", e))?;
             Ok(())
         } else {
@@ -81,7 +85,10 @@ impl ProcessManager {
             // Actually kill the child process to prevent zombie leaks (P0-2 fix)
             let mut managed = proc.lock().await;
             if let Err(e) = managed.child.kill().await {
-                eprintln!("[TOKENICODE] Failed to kill process for session {}: {}", id, e);
+                eprintln!(
+                    "[TOKENICODE] Failed to kill process for session {}: {}",
+                    id, e
+                );
             }
         }
     }

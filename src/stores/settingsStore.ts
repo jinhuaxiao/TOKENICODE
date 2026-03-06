@@ -67,6 +67,8 @@ interface SettingsState {
   userAvatarUrl: string;
   /** User display name shown next to messages */
   userDisplayName: string;
+  /** Whether to show dotfiles (hidden files) in the file tree */
+  showHiddenFiles: boolean;
 
   toggleTheme: () => void;
   setTheme: (theme: Theme) => void;
@@ -97,6 +99,7 @@ interface SettingsState {
   setAiAvatarUrl: (url: string) => void;
   setUserAvatarUrl: (url: string) => void;
   setUserDisplayName: (name: string) => void;
+  toggleHiddenFiles: () => void;
 }
 
 // --- Theme cycle order ---
@@ -136,6 +139,7 @@ export const useSettingsStore = create<SettingsState>()(
       aiAvatarUrl: '',
       userAvatarUrl: '',
       userDisplayName: '',
+      showHiddenFiles: false,
 
       toggleTheme: () =>
         set((state) => ({ theme: nextTheme(state.theme) })),
@@ -225,6 +229,8 @@ export const useSettingsStore = create<SettingsState>()(
 
       setUserDisplayName: (name) =>
         set(() => ({ userDisplayName: name.slice(0, 20) })),
+      toggleHiddenFiles: () =>
+        set((state) => ({ showHiddenFiles: !state.showHiddenFiles })),
     }),
     {
       name: 'tokenicode-settings',
@@ -282,6 +288,7 @@ export const useSettingsStore = create<SettingsState>()(
         aiAvatarUrl: state.aiAvatarUrl,
         userAvatarUrl: state.userAvatarUrl,
         userDisplayName: state.userDisplayName,
+        showHiddenFiles: state.showHiddenFiles,
       }),
     },
   ),

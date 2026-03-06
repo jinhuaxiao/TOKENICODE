@@ -151,6 +151,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'files.delete': '删除',
     'files.deleteConfirm': '确定要将 "{name}" 移到回收站吗？',
     'files.deleteConfirmDir': '确定要将文件夹 "{name}" 及其所有内容移到回收站吗？',
+    'files.toggleHidden': '显示/隐藏隐藏文件',
 
     // ProjectSelector
     'project.selectFolder': '选择项目文件夹',
@@ -775,6 +776,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'files.delete': 'Delete',
     'files.deleteConfirm': 'Move "{name}" to trash?',
     'files.deleteConfirmDir': 'Move folder "{name}" and all its contents to trash?',
+    'files.toggleHidden': 'Show/Hide hidden files',
 
     // ProjectSelector
     'project.selectFolder': 'Select Project Folder',

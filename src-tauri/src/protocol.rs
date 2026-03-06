@@ -90,9 +90,7 @@ pub enum SdkControlRequestPayload {
         model: Option<String>,
     },
     #[serde(rename = "rewind_files")]
-    RewindFiles {
-        user_message_id: String,
-    },
+    RewindFiles { user_message_id: String },
 }
 
 impl ControlRequest {
@@ -156,10 +154,17 @@ mod tests {
         }"#;
         let msg: StdoutMessage = serde_json::from_str(json).unwrap();
         match msg {
-            StdoutMessage::ControlRequest { request_id, request } => {
+            StdoutMessage::ControlRequest {
+                request_id,
+                request,
+            } => {
                 assert_eq!(request_id, "abc123");
                 match request {
-                    ControlRequestPayload::CanUseTool { tool_name, description, .. } => {
+                    ControlRequestPayload::CanUseTool {
+                        tool_name,
+                        description,
+                        ..
+                    } => {
                         assert_eq!(tool_name, "Bash");
                         assert_eq!(description.unwrap(), "List files");
                     }

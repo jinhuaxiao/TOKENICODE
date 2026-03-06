@@ -19,8 +19,8 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
-    version: '0.8.4',
-    date: '2026-03-05',
+    version: '0.8.5',
+    date: '2026-03-06',
     highlights: {
       zh: [],
       en: [],
@@ -33,11 +33,15 @@ export const CHANGELOG: ChangelogEntry[] = [
             '文件右键分享 — macOS 右键菜单新增「分享…」和「分享到微信」',
             '用户头像与昵称 — 设置中自定义头像和显示名，聊天气泡右侧展示',
             '自部署 CLI 注入 shell PATH — macOS/Linux 安装后自动写入 ~/.zshrc 等，终端可直接用 claude',
+            '隐藏文件开关 — 文件树标题栏新增眼睛按钮，一键切换隐藏/显示 dotfiles',
+            '更新日志分类 — 「更新说明」弹窗按新功能/修复/改进分组展示',
           ],
           en: [
             'File sharing — "Share..." and "Share to WeChat" added to macOS file context menu',
             'User avatar & display name — Customize in Settings, shown next to chat bubbles',
             'Self-deployed CLI injects shell PATH — macOS/Linux auto-writes to ~/.zshrc etc., claude works from terminal',
+            'Hidden files toggle — Eye button in file tree header to show/hide dotfiles',
+            'Categorized changelog — "What\'s New" modal groups entries by type',
           ],
         },
       },
@@ -50,6 +54,11 @@ export const CHANGELOG: ChangelogEntry[] = [
             '继承配置修复 — 不再意外清除系统环境变量，继承模式正常使用系统 API Key',
             '标题生成适配第三方 — 使用 provider 映射的 haiku 模型，无映射时静默跳过',
             '多窗口串消息 — 切换对话窗口后，后台会话的回复不再串到前台窗口',
+            'Windows 安装修复 — 缺少 git-bash 时重装不再被"已检测到 CLI"短路，正确走修复路径',
+            'Windows CLI 调用统一 — run_claude_command 和 check_claude_auth 统一 cmd /C 包装，.cmd/.bat 不再启动失败',
+            'Windows timeout 回退 — CLI 超时后正确回退到 PATH / Claude Desktop / scoop / nvm 等候选',
+            'Unix 终端可用 — 自部署 Node 安装后自动写入 shell PATH，终端里 claude 命令不再找不到',
+            '终端登录路径安全 — open_terminal_login 对 CLI 路径做 shell quoting，带空格路径不再报错',
           ],
           en: [
             'CLI discovery priority — System-installed CLI takes precedence over self-deployed, login state shared correctly',
@@ -57,6 +66,11 @@ export const CHANGELOG: ChangelogEntry[] = [
             'Inherit config fix — No longer clears system env vars, inherited mode correctly uses system API Key',
             'Title generation adapts to providers — Uses provider-mapped haiku model, silently skips when unmapped',
             'Cross-tab message leaking — Background session responses no longer bleed into the active tab',
+            'Windows install fix — Missing git-bash no longer short-circuits reinstall when CLI is already detected',
+            'Windows CLI invocation — run_claude_command and check_claude_auth now consistently use cmd /C wrapper for .cmd/.bat',
+            'Windows timeout fallback — CLI timeout correctly falls back to PATH / Claude Desktop / scoop / nvm candidates',
+            'Unix terminal CLI — Self-deployed Node install now writes shell PATH, claude command works from terminal',
+            'Terminal login path safety — open_terminal_login applies shell quoting, paths with spaces no longer break',
           ],
         },
       },
