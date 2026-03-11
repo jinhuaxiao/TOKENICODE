@@ -19,6 +19,31 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.8.10',
+    date: '2026-03-11',
+    highlights: {
+      zh: ['CLI 原生二进制检测、Windows Git 解压超时修复'],
+      en: ['Native CLI binary detection, Windows Git extraction timeout fix'],
+    },
+    categories: [
+      {
+        label: { zh: '修复', en: 'Fixes' },
+        items: {
+          zh: [
+            'CLI 检测优先原生二进制 — ~/.claude/local/claude 优先于 npm 路径，避免 Node.js v22 的 --sdk-url bug',
+            'Windows PortableGit 解压超时 — 超时从 120 秒延长至 300 秒，低配机器不再误报失败',
+            '错误分类修正 — 本地解压超时不再被误判为网络错误，不再误提示「需要 VPN」',
+          ],
+          en: [
+            'CLI detection prioritizes native binary — ~/.claude/local/claude checked before npm paths, avoiding Node.js v22 --sdk-url bug',
+            'Windows PortableGit extraction timeout — Extended from 120s to 300s, preventing false failures on slower machines',
+            'Error classification fix — Local extraction timeout no longer misidentified as network error',
+          ],
+        },
+      },
+    ],
+  },
+  {
     version: '0.8.9',
     date: '2026-03-11',
     highlights: {

@@ -4957,6 +4957,17 @@ async fn install_node_env_inner(app: &AppHandle, china: bool) -> Result<(), Stri
 
         match download_with_progress(app, &client, url, "node_downloading").await {
             Ok(bytes) => {
+                // Node.js archive is ~25-40MB. If we got less than 1MB, CDN likely
+                // returned an HTML error page (common with China ISP/CDN hijacking).
+                if bytes.len() < 1_000_000 {
+                    let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(200)]);
+                    last_err = format!(
+                        "Source {}: downloaded only {} bytes (expected ~30MB), likely CDN error: {}",
+                        url, bytes.len(), preview
+                    );
+                    eprintln!("{}", last_err);
+                    continue;
+                }
                 eprintln!("Node.js download succeeded from source {}", i);
                 archive_bytes = Some(bytes);
                 break;
@@ -5103,6 +5114,17 @@ async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Result<(), Stri
 
         match download_with_progress(app, &client, url, "git_downloading").await {
             Ok(bytes) => {
+                // PortableGit 7z.exe is ~60MB. If we got less than 1MB, the CDN likely
+                // returned an HTML error page (common with China ISP/CDN hijacking).
+                if bytes.len() < 1_000_000 {
+                    let preview = String::from_utf8_lossy(&bytes[..bytes.len().min(200)]);
+                    last_err = format!(
+                        "Source {}: downloaded only {} bytes (expected ~60MB), likely CDN error: {}",
+                        url, bytes.len(), preview
+                    );
+                    eprintln!("{}", last_err);
+                    continue;
+                }
                 eprintln!("PortableGit download succeeded ({} bytes)", bytes.len());
                 archive_bytes = Some(bytes);
                 break;
@@ -5132,7 +5154,7 @@ async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Result<(), Stri
     // Run the self-extracting archive silently: -o<dir> -y
     eprintln!("Extracting PortableGit to {:?}...", install_dir);
     let extract_result = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
+        std::time::Duration::from_secs(300),
         Command::new(&temp_path)
             .args([&format!("-o{}", install_dir.display()), "-y"])
             .stdin(Stdio::null())
@@ -5159,7 +5181,7 @@ async fn install_git_bash_inner(app: &AppHandle, china: bool) -> Result<(), Stri
             return Err(format!("Failed to run PortableGit extractor: {}", e));
         }
         Err(_) => {
-            return Err("PortableGit extraction timed out after 120s".to_string());
+            return Err("PortableGit local extraction timed out after 300s (not a network issue)".to_string());
         }
     }
 

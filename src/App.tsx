@@ -161,9 +161,7 @@ function App() {
   useEffect(() => {
     useSessionStore.getState().loadCustomPreviewsFromDisk();
     useProviderStore.getState().load();
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission().catch(() => {});
-    }
+    // Notification permission is requested lazily on first need (see useStreamProcessor.ts)
   }, []);
 
   // Changelog modal state

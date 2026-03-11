@@ -11,9 +11,11 @@ export function isNetworkError(msg: string): boolean {
   // If it's a permission error, don't misclassify as network
   // (e.g. FetchError wrapping EPERM on npm cache)
   if (isPermissionError(msg)) return false;
+  const lower = msg.toLowerCase();
+  // Local extraction timeout is NOT a network issue
+  if (lower.includes('local extraction') || lower.includes('not a network issue')) return false;
   const hints = ['timeout', 'timed out', 'network', 'connect', 'ENOTFOUND',
     'ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'fetch', 'Failed to download',
     'All install methods failed', 'dns', 'certificate'];
-  const lower = msg.toLowerCase();
   return hints.some(h => lower.includes(h.toLowerCase()));
 }
