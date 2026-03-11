@@ -476,6 +476,22 @@ fn find_claude_binary_skip_app_local() -> Option<String> {
                 return Some(bin);
             }
         }
+        // 2b. Native binary install (~/.claude/local/claude)
+        #[cfg(not(target_os = "windows"))]
+        {
+            let native = home.join(".claude/local/claude");
+            if is_valid_executable(&native) {
+                return Some(native.to_string_lossy().to_string());
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let native = home.join(".claude\\local\\claude.exe");
+            if is_valid_executable(&native) {
+                return Some(native.to_string_lossy().to_string());
+            }
+        }
+
         // 3. Common global install paths
         #[cfg(target_os = "windows")]
         {
