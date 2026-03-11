@@ -32,7 +32,9 @@ export const CHANGELOG: ChangelogEntry[] = [
           zh: [
             'CLI 检测优先原生二进制 — ~/.claude/local/claude 优先于 npm 路径，避免 Node.js v22 的 --sdk-url bug',
             'Windows PortableGit 解压超时 — 超时从 120 秒延长至 300 秒，低配机器不再误报失败',
+            '下载内容校验 — 检测 CDN 劫持（< 1MB 自动跳到下一个镜像源）',
             '错误分类修正 — 本地解压超时不再被误判为网络错误，不再误提示「需要 VPN」',
+            '通知权限 — 不再启动时弹出权限请求，改为首次需要时懒加载',
           ],
           en: [
             'CLI detection prioritizes native binary — ~/.claude/local/claude checked before npm paths, avoiding Node.js v22 --sdk-url bug',
