@@ -98,6 +98,8 @@ export interface SessionMeta {
   totalOutputTokens?: number;
   /** Timestamp (Date.now()) when the current turn started — used for elapsed timer */
   turnStartTime?: number;
+  /** Timestamp of last stream activity — used for stall detection instead of total elapsed */
+  lastProgressAt?: number;
   /** JSON fingerprint of the active provider config used when spawning the CLI process.
    *  Compared before sending via stdin to detect stale pre-warm sessions. */
   envFingerprint?: string;
