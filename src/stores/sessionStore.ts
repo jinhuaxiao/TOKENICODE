@@ -27,7 +27,7 @@ function saveLastSessionId(id: string | null) {
 }
 
 function loadLastSessionId(): string | null {
-  return localStorage.getItem(LAST_SESSION_KEY);
+  return sessionStorage.getItem(LAST_SESSION_KEY);
 }
 
 /** Persist stdinToTab across page refreshes using sessionStorage.
