@@ -216,6 +216,8 @@ interface ChatState {
   addMessageToCache: (tabId: string, message: ChatMessage) => void;
   /** Update partial text in a background session's cache */
   updatePartialInCache: (tabId: string, text: string) => void;
+  /** Update partial thinking in a background session's cache */
+  updatePartialThinkingInCache: (tabId: string, thinking: string) => void;
   /** Update session status in a background session's cache */
   setStatusInCache: (tabId: string, status: SessionStatus) => void;
   /** Update session meta in a background session's cache */
