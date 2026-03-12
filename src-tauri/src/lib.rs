@@ -1898,6 +1898,9 @@ async fn start_claude_session(
                 eprintln!("[TOKENICODE] emit_to_frontend failed: {}", e);
             }
         }
+        // Clean up bypass mode flag for this session
+        bypass_modes_clone.remove(&sid_clone).await;
+
         // Emit process_exit on the stream channel (primary detection)
         let _ = emit_to_frontend(
             &app_clone,
