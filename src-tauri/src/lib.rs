@@ -1756,7 +1756,7 @@ async fn start_claude_session(
                         .unwrap_or_default();
 
                     // Bypass mode: auto-approve everything except user interactions.
-                    if is_bypass {
+                    if is_bypass_flag.load(std::sync::atomic::Ordering::Relaxed) {
                         let tool_name = request
                             .get("tool_name")
                             .or_else(|| request.get("toolName"))
