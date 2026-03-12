@@ -234,7 +234,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'tokenicode-settings',
-      version: 4,
+      version: 5,
       migrate: (persistedState: unknown, version: number) => {
         const persisted = persistedState as Record<string, unknown>;
         if (version === 0) {
@@ -266,6 +266,10 @@ export const useSettingsStore = create<SettingsState>()(
           const oldThinking = persisted.thinkingEnabled;
           persisted.thinkingLevel = oldThinking === false ? 'off' : 'high';
           delete persisted.thinkingEnabled;
+        }
+        if (version < 5) {
+          // Force default mode to bypass — old versions may have persisted 'code'/'ask'
+          persisted.sessionMode = 'bypass';
         }
         return persisted;
       },

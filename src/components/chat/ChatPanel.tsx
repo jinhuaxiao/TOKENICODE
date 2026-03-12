@@ -302,6 +302,7 @@ export function ChatPanel() {
   const toggleSecondaryPanel = useSettingsStore((s) => s.toggleSecondaryPanel);
   const agentPanelOpen = useSettingsStore((s) => s.agentPanelOpen);
   const toggleAgentPanel = useSettingsStore((s) => s.toggleAgentPanel);
+  const sessionMode = useSettingsStore((s) => s.sessionMode);
   const workingDirectory = useSettingsStore((s) => s.workingDirectory);
   const activeProvider = useProviderStore((s) => {
     if (!s.activeProviderId) return null;
@@ -492,6 +493,14 @@ export function ChatPanel() {
             <span className="text-text-tertiary">
               {activeProvider ? (activeProvider.name || 'Custom') : 'CLI'}
             </span>
+          </div>
+
+          {/* Current session mode indicator */}
+          <div className={`flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded
+            ${sessionMode === 'bypass'
+              ? 'text-warning/80'
+              : 'text-text-tertiary'}`}>
+            <span>{t(`mode.${sessionMode}`)}</span>
           </div>
 
           {/* Floating agent panel popover — anchored to agent button */}
