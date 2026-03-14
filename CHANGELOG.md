@@ -8,6 +8,14 @@ All notable changes to TOKENICODE will be documented in this file.
 
 ## [Unreleased]
 
+---
+
+## [0.8.13] - 2026-03-14
+
+### Added
+
+- **原生二进制安装 Claude CLI** — 新增从 GCS 直接下载 Claude Code 原生二进制的安装方式，无需 Node.js/npm。中国用户自动走 herear.cn 镜像加速。安装失败自动降级到 npm 方式。
+
 ### Changed
 
 - **Updater 下载源优先级调整** — 自有服务器 `herear.cn:8443` 作为第一优先级，GitHub 兜底，Gitee 仅保留 updater JSON。解决 Gitee 容量限制和私有仓库下载认证问题。
