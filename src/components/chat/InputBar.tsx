@@ -751,17 +751,16 @@ export function InputBar() {
 
     clearFiles();
 
-    // Gate: if AI is actively processing (running but not awaiting user input),
-    // queue this follow-up message instead of sending it to stdin immediately.
-    // This prevents the follow-up from being consumed as an answer to an
-    // upcoming AskUserQuestion or PlanReview interaction.
+    // Gate: only queue messages when there's an unresolved interaction card
+    // (permission/question/plan_review) to prevent them from being consumed as answers.
+    // Otherwise, send directly — CLI handles concurrent messages fine.
     const existingStdinId = useChatStore.getState().sessionMeta.stdinId;
-    const { sessionStatus: currentStatus, activityStatus: currentActivity } = useChatStore.getState();
-    const isActivelyProcessing = existingStdinId
-      && currentStatus === 'running'
-      && currentActivity.phase !== 'awaiting';
+    const { sessionStatus: currentStatus, messages: currentMsgs } = useChatStore.getState();
+    const hasUnresolvedInteraction = currentMsgs.some(
+      (m) => ['permission', 'question', 'plan_review'].includes(m.type) && !m.resolved,
+    );
 
-    if (isActivelyProcessing) {
+    if (existingStdinId && currentStatus === 'running' && hasUnresolvedInteraction) {
       useChatStore.getState().addPendingMessage(text);
       return;
     }

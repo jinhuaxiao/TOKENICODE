@@ -1615,7 +1615,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 useChatStore.getState().setSessionStatus('idle');
               }
             }
-          }, 90_000);
+          }, 15_000); // Bug C fix (#27): reduced from 90s to 15s
           break; // Skip pending message flush — compact takes priority
         }
 
@@ -1677,6 +1677,13 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         // The CLI process has exited — clear the stdin handle but keep sessionId for resume
         clearPartial();
         console.log('[TOKENICODE:session] process_exit received', { stdinId: msg.__stdinId });
+
+        // Bug C fix (#27): Clear stuck pendingCommandMsgId (e.g., /compact without result)
+        const exitPendingCmd = useChatStore.getState().sessionMeta.pendingCommandMsgId;
+        if (exitPendingCmd) {
+          useChatStore.getState().updateMessage(exitPendingCmd, { commandCompleted: true });
+          useChatStore.getState().setSessionMeta({ pendingCommandMsgId: undefined });
+        }
 
         // If the session was running and no assistant messages were received,
         // the process failed at startup. Show the last stderr error to the user.
@@ -1758,7 +1765,17 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
         if (exitingStdinId) {
           useSessionStore.getState().unregisterStdinTab(exitingStdinId);
         }
-        useChatStore.getState().clearPendingMessages();
+        // Bug B fix (#28): Don't discard pending messages — restore to input draft
+        const remainingPending = useChatStore.getState().pendingUserMessages;
+        if (remainingPending.length > 0) {
+          const draft = useChatStore.getState().inputDraft;
+          const pendingText = remainingPending.join('\n\n');
+          useChatStore.getState().setInputDraft(
+            draft ? `${draft}\n\n${pendingText}` : pendingText
+          );
+          useChatStore.getState().clearPendingMessages();
+        }
+
         agentActions.completeAll();
         useSessionStore.getState().fetchSessions();
         break;
