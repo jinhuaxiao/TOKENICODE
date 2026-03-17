@@ -4114,14 +4114,17 @@ const MIN_CLI_VERSION: (u32, u32, u32) = (1, 0, 0);
 
 /// Parse version string like "1.0.26" or "Claude Code v2.1.76" into (major, minor, patch).
 fn parse_cli_version(version_str: &str) -> Option<(u32, u32, u32)> {
-    // Extract version number — strip common prefixes
+    // Extract version number — strip common prefixes and pre-release suffixes
     let cleaned = version_str
         .trim()
         .trim_start_matches("Claude Code")
         .trim()
         .trim_start_matches('v')
         .trim();
-    let parts: Vec<&str> = cleaned.split('.').collect();
+    // Take first whitespace-separated token, then strip pre-release: "2.1.77-rc.1" → "2.1.77"
+    let ver_token = cleaned.split_whitespace().next().unwrap_or(cleaned);
+    let base_ver = ver_token.split('-').next().unwrap_or(ver_token);
+    let parts: Vec<&str> = base_ver.split('.').collect();
     if parts.len() >= 3 {
         let major = parts[0].parse().ok()?;
         let minor = parts[1].parse().ok()?;
@@ -4839,21 +4842,11 @@ async fn install_cli_via_native_binary(app: &AppHandle, china: bool) -> Result<(
 /// 2. npm fallback (for edge cases where native download fails)
 #[tauri::command]
 async fn install_claude_cli(app: AppHandle) -> Result<(), String> {
-    let existing_cli = find_claude_binary();
+    // Always proceed — user explicitly requested install/reinstall.
+    // Old logic skipped if CLI found, causing "reinstall" to complete in 1 second.
+    let _existing_cli = find_claude_binary();
     #[cfg(target_os = "windows")]
-    let can_skip_install = existing_cli.is_some() && find_git_bash().is_some();
-    #[cfg(not(target_os = "windows"))]
-    let can_skip_install = existing_cli.is_some();
-    if can_skip_install {
-        eprintln!("CLI already found on system, skipping installation");
-        let _ = app.emit(
-            "setup:download:progress",
-            serde_json::json!({
-                "downloaded": 0, "total": 0, "percent": 100, "phase": "complete"
-            }),
-        );
-        return Ok(());
-    }
+    { /* git-bash check happens below */ }
 
     let china = is_china_network().await;
 
@@ -5045,6 +5038,27 @@ fn finalize_cli_install_paths(app: &AppHandle) {
             inject_unix_shell_path(&npm_bin.to_string_lossy());
         }
         let _ = app;
+    }
+
+    // Inject new directories into CURRENT PROCESS PATH so spawned CLI processes
+    // and subsequent find_claude_binary() calls work without app restart.
+    {
+        let mut extra_dirs: Vec<String> = vec![];
+        if let Some(cli_dir) = cli_download_dir() {
+            extra_dirs.push(cli_dir.to_string_lossy().to_string());
+        }
+        if let Some(node_bin) = get_local_node_bin() {
+            extra_dirs.push(node_bin.to_string_lossy().to_string());
+        }
+        if let Some(npm_bin) = get_npm_global_bin() {
+            extra_dirs.push(npm_bin.to_string_lossy().to_string());
+        }
+        if !extra_dirs.is_empty() {
+            let current = std::env::var("PATH").unwrap_or_default();
+            let new_path = format!("{}:{}", extra_dirs.join(":"), current);
+            std::env::set_var("PATH", &new_path);
+            eprintln!("[TC CLI] Injected into current process PATH: {:?}", extra_dirs);
+        }
     }
 
     let _ = app.emit(
