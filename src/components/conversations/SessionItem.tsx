@@ -149,6 +149,7 @@ export function SessionItem({
             value={renameValue}
             onChange={(e) => setRenameValue(e.target.value)}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
               if (e.key === 'Enter') handleRenameConfirm();
               if (e.key === 'Escape') handleRenameCancel();
             }}

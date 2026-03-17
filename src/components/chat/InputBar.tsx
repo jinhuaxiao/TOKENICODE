@@ -1187,7 +1187,7 @@ export function InputBar() {
         setSlashIndex((prev) => (prev + 1) % count);
         return true;
       }
-      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey)) {
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.isComposing)) {
         e.preventDefault();
         if (filtered[slashIndex]) {
           handleSlashSelect(filtered[slashIndex]);

@@ -6,7 +6,7 @@ import { persist } from 'zustand/middleware';
 export type Theme = 'light' | 'dark' | 'system';
 export type ColorTheme = 'black' | 'blue' | 'orange' | 'green';
 export type SecondaryPanelTab = 'files' | 'skills';
-export type ModelId = 'claude-opus-4-6' | 'claude-sonnet-4-6' | 'claude-haiku-4-5';
+export type ModelId = 'claude-opus-4-6' | 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
 export type SessionMode = 'code' | 'ask' | 'plan' | 'bypass';
 /** CLI permission mode for the SDK control protocol */
 export type CliPermissionMode = 'acceptEdits' | 'default' | 'plan' | 'bypassPermissions';
@@ -28,7 +28,7 @@ export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high' | 'max';
 export const MODEL_OPTIONS: { id: ModelId; label: string; short: string }[] = [
   { id: 'claude-opus-4-6', label: 'Claude Opus 4.6', short: 'Opus 4.6' },
   { id: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6', short: 'Sonnet 4.6' },
-  { id: 'claude-haiku-4-5', label: 'Claude Haiku 4.5', short: 'Haiku 4.5' },
+  { id: 'claude-haiku-4-5-20251001', label: 'Claude Haiku 4.5', short: 'Haiku 4.5' },
 ];
 
 // --- Store State & Actions ---
@@ -234,7 +234,7 @@ export const useSettingsStore = create<SettingsState>()(
     }),
     {
       name: 'tokenicode-settings',
-      version: 5,
+      version: 6,
       migrate: (persistedState: unknown, version: number) => {
         const persisted = persistedState as Record<string, unknown>;
         if (version === 0) {
@@ -242,7 +242,7 @@ export const useSettingsStore = create<SettingsState>()(
           const legacyMap: Record<string, ModelId> = {
             'claude-opus-4-0': 'claude-opus-4-6',
             'claude-sonnet-4-0': 'claude-sonnet-4-6',
-            'claude-haiku-3-5': 'claude-haiku-4-5',
+            'claude-haiku-3-5': 'claude-haiku-4-5-20251001',
           };
           const old = persisted.selectedModel as string;
           if (old && legacyMap[old]) {
@@ -270,6 +270,12 @@ export const useSettingsStore = create<SettingsState>()(
         if (version < 5) {
           // Force default mode to bypass — old versions may have persisted 'code'/'ask'
           persisted.sessionMode = 'bypass';
+        }
+        if (version < 6) {
+          // Fix Haiku model ID: claude-haiku-4-5 → claude-haiku-4-5-20251001
+          if (persisted.selectedModel === 'claude-haiku-4-5') {
+            persisted.selectedModel = 'claude-haiku-4-5-20251001';
+          }
         }
         return persisted;
       },

@@ -4,6 +4,8 @@ export interface PresetProvider {
   baseUrl: string;
   apiFormat: 'anthropic' | 'openai';
   extra_env: Record<string, string>;
+  /** Default model for all tiers (non-Claude providers) */
+  defaultModel?: string;
 }
 
 export const PROVIDER_PRESETS: PresetProvider[] = [
@@ -24,9 +26,10 @@ export const PROVIDER_PRESETS: PresetProvider[] = [
   {
     id: 'zhipu',
     name: '智谱 GLM',
-    baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    apiFormat: 'openai',
+    baseUrl: 'https://open.bigmodel.cn/api/anthropic',
+    apiFormat: 'anthropic',
     extra_env: {},
+    defaultModel: 'glm-5',
   },
   {
     id: 'qwen-coder',
@@ -37,16 +40,18 @@ export const PROVIDER_PRESETS: PresetProvider[] = [
   },
   {
     id: 'kimi',
-    name: 'Kimi k2',
-    baseUrl: 'https://api.moonshot.ai/v1',
-    apiFormat: 'openai',
+    name: 'Kimi',
+    baseUrl: 'https://api.kimi.com/coding/',
+    apiFormat: 'anthropic',
     extra_env: {},
+    defaultModel: 'kimi-for-coding',
   },
   {
     id: 'minimax',
     name: 'MiniMax',
-    baseUrl: 'https://api.minimaxi.com/v1',
-    apiFormat: 'openai',
+    baseUrl: 'https://api.minimaxi.com/anthropic',
+    apiFormat: 'anthropic',
     extra_env: {},
+    defaultModel: 'MiniMax-M2.5',
   },
 ];

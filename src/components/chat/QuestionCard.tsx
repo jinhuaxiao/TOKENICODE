@@ -297,6 +297,7 @@ export function QuestionCard({ message, floating }: Props) {
                     focus:border-border-focus outline-none text-text-primary
                     placeholder:text-text-tertiary transition-smooth"
                   onKeyDown={(e) => {
+                    if (e.nativeEvent.isComposing) return;
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();
                       if (hasCurrentSelection) handleConfirm();

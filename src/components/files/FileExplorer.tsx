@@ -399,6 +399,7 @@ function TreeNode({
             value={renameValue}
             onChange={(e) => onRenameChange(e.target.value)}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing) return;
               if (e.key === 'Enter') onRenameSubmit();
               if (e.key === 'Escape') onRenameCancel();
             }}
@@ -429,6 +430,7 @@ function TreeNode({
                 value={createName}
                 onChange={(e) => onCreateNameChange(e.target.value)}
                 onKeyDown={(e) => {
+                  if (e.nativeEvent.isComposing) return;
                   if (e.key === 'Enter' && createName.trim()) onCreateSubmit();
                   if (e.key === 'Escape') onCreateCancel();
                 }}
@@ -824,6 +826,7 @@ export function FileExplorer() {
                     value={createName}
                     onChange={(e) => setCreateName(e.target.value)}
                     onKeyDown={(e) => {
+                      if (e.nativeEvent.isComposing) return;
                       if (e.key === 'Enter') handleCreateSubmit();
                       if (e.key === 'Escape') handleCreateCancel();
                     }}

@@ -7,7 +7,7 @@ import { useProviderStore } from '../../stores/providerStore';
 const TIER_MAP: Record<ModelId, 'opus' | 'sonnet' | 'haiku'> = {
   'claude-opus-4-6': 'opus',
   'claude-sonnet-4-6': 'sonnet',
-  'claude-haiku-4-5': 'haiku',
+  'claude-haiku-4-5-20251001': 'haiku',
 };
 
 export function ModelSelector({ disabled = false }: { disabled?: boolean }) {

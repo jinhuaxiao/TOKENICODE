@@ -20,7 +20,7 @@ export function resolveModelOrError(selectedModel: ModelId): ModelResolution {
   const tierMap: Record<ModelId, 'opus' | 'sonnet' | 'haiku'> = {
     'claude-opus-4-6': 'opus',
     'claude-sonnet-4-6': 'sonnet',
-    'claude-haiku-4-5': 'haiku',
+    'claude-haiku-4-5-20251001': 'haiku',
   };
   const tier = tierMap[selectedModel];
   if (!tier) return { ok: true, model: selectedModel };

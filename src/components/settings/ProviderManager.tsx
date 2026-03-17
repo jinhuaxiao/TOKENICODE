@@ -46,9 +46,9 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
       baseUrl: preset.baseUrl,
       apiFormat: preset.apiFormat,
       modelMappings: [
-        { tier: 'opus', providerModel: 'claude-opus-4-6' },
-        { tier: 'sonnet', providerModel: 'claude-sonnet-4-6' },
-        { tier: 'haiku', providerModel: 'claude-haiku-4-5-20251001' },
+        { tier: 'opus', providerModel: preset.defaultModel || 'claude-opus-4-6' },
+        { tier: 'sonnet', providerModel: preset.defaultModel || 'claude-sonnet-4-6' },
+        { tier: 'haiku', providerModel: preset.defaultModel || 'claude-haiku-4-5-20251001' },
       ],
       extra_env: { ...preset.extra_env },
       preset: preset.id,
@@ -67,9 +67,9 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
       baseUrl: '',
       apiFormat: 'anthropic',
       modelMappings: [
-        { tier: 'opus', providerModel: '' },
-        { tier: 'sonnet', providerModel: '' },
-        { tier: 'haiku', providerModel: '' },
+        { tier: 'opus', providerModel: 'claude-opus-4-6' },
+        { tier: 'sonnet', providerModel: 'claude-sonnet-4-6' },
+        { tier: 'haiku', providerModel: 'claude-haiku-4-5-20251001' },
       ],
       extra_env: {},
     });
