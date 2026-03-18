@@ -19,6 +19,27 @@ export interface ChangelogEntry {
  */
 export const CHANGELOG: ChangelogEntry[] = [
   {
+    version: '0.8.20',
+    date: '2026-03-19',
+    highlights: {
+      zh: ['MiMo 模型映射优化：Pro 启用 1M 上下文'],
+      en: ['MiMo model mapping: Pro with 1M context'],
+    },
+    categories: [
+      {
+        label: { zh: '优化', en: 'Changed' },
+        items: {
+          zh: [
+            'mimo-v2-pro 启用 1M 上下文，haiku 默认模型改为 mimo-v2-pro',
+          ],
+          en: [
+            'mimo-v2-pro now uses 1M context, haiku default changed to mimo-v2-pro',
+          ],
+        },
+      },
+    ],
+  },
+  {
     version: '0.8.19',
     date: '2026-03-19',
     highlights: {
