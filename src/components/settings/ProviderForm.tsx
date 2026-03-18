@@ -2,6 +2,8 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { useProviderStore, type ApiProvider, type ModelMapping } from '../../stores/providerStore';
 import { bridge, type ConnectionTestResult } from '../../lib/tauri-bridge';
 import { useT } from '../../lib/i18n';
+import { openUrl } from '@tauri-apps/plugin-opener';
+import { PROVIDER_PRESETS } from '../../lib/provider-presets';
 
 const MODEL_TIERS: { tier: 'opus' | 'sonnet' | 'haiku'; labelKey: string; placeholderKey: string }[] = [
   { tier: 'opus', labelKey: 'provider.opusModel', placeholderKey: 'provider.opusPlaceholder' },
@@ -87,15 +89,39 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
   // API format selector hidden from UI — kept for backward compat
   const _handleApiFormatChange = (v: 'anthropic' | 'openai') => { setApiFormat(v); autoSave({ apiFormat: v }); }; void _handleApiFormatChange;
 
-  const getMapping = (tier: 'opus' | 'sonnet' | 'haiku'): string => {
+  const FIXED_TIERS = new Set(['opus', 'sonnet', 'haiku']);
+
+  const getMapping = (tier: string): string => {
     return mappings.find((m) => m.tier === tier)?.providerModel || '';
   };
 
-  const updateMapping = (tier: 'opus' | 'sonnet' | 'haiku', value: string) => {
+  const updateMapping = (tier: string, value: string) => {
     const updated = mappings.filter((m) => m.tier !== tier);
     if (value) {
       updated.push({ tier, providerModel: value });
     }
+    setMappings(updated);
+    autoSave({ modelMappings: updated });
+  };
+
+  const extraMappings = mappings.filter((m) => !FIXED_TIERS.has(m.tier));
+
+  const addExtraMapping = () => {
+    const updated = [...mappings, { tier: '', providerModel: '' }];
+    setMappings(updated);
+    autoSave({ modelMappings: updated });
+  };
+
+  const updateExtraTier = (oldTier: string, newTier: string) => {
+    const updated = mappings.map((m) =>
+      m.tier === oldTier && !FIXED_TIERS.has(m.tier) ? { ...m, tier: newTier } : m,
+    );
+    setMappings(updated);
+    autoSave({ modelMappings: updated });
+  };
+
+  const removeExtraMapping = (tier: string) => {
+    const updated = mappings.filter((m) => m.tier !== tier || FIXED_TIERS.has(m.tier));
     setMappings(updated);
     autoSave({ modelMappings: updated });
   };
@@ -275,7 +301,18 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
 
       {/* API Key */}
       <div>
-        <label className="text-xs text-text-muted mb-1 block">{t('provider.apiKey')}</label>
+        <div className="flex items-center justify-between mb-1">
+          <label className="text-xs text-text-muted">{t('provider.apiKey')}</label>
+          {provider.preset && (() => {
+            const keyUrl = PROVIDER_PRESETS.find(p => p.id === provider.preset)?.keyUrl;
+            return keyUrl ? (
+              <button onClick={() => openUrl(keyUrl)}
+                className="text-xs text-accent hover:underline">
+                {t('provider.getApiKey')}
+              </button>
+            ) : null;
+          })()}
+        </div>
         <div className="flex gap-1.5">
           <input
             className={`${INPUT_CLASS} flex-1`}
@@ -306,6 +343,34 @@ export function ProviderForm({ provider, onClose, onDelete, autoTest, onTestStat
                 placeholder={t(placeholderKey)} />
             </div>
           ))}
+          {extraMappings.map((m, i) => (
+            <div key={`extra-${i}`} className="flex items-center gap-1.5">
+              <input className="w-2/5 shrink-0 px-3 py-2 text-[13px] bg-bg-chat border border-border-subtle rounded-lg text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent"
+                value={m.tier}
+                onChange={(e) => updateExtraTier(m.tier, e.target.value)}
+                placeholder={t('provider.modelIdPlaceholder')} />
+              <span className="text-text-tertiary text-xs shrink-0">→</span>
+              <input className="flex-1 min-w-0 px-3 py-2 text-[13px] bg-bg-chat border border-border-subtle rounded-lg text-text-primary placeholder:text-text-tertiary focus:outline-none focus:border-accent"
+                value={m.providerModel}
+                onChange={(e) => updateMapping(m.tier || `__extra_${i}`, e.target.value)}
+                placeholder={t('provider.providerModelPlaceholder')} />
+              <button onClick={() => removeExtraMapping(m.tier)}
+                className="text-text-tertiary hover:text-text-primary transition-smooth shrink-0 p-0.5">
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none"
+                  stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+                  <path d="M4 4l8 8M12 4l-8 8" />
+                </svg>
+              </button>
+            </div>
+          ))}
+          <button onClick={addExtraMapping}
+            className="flex items-center gap-1 text-xs text-text-tertiary hover:text-text-muted transition-smooth mt-1">
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="none"
+              stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
+              <path d="M8 3v10M3 8h10" />
+            </svg>
+            {t('provider.addModelMapping')}
+          </button>
         </div>
       </div>
 

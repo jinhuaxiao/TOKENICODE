@@ -150,16 +150,40 @@ fn is_valid_executable(path: &std::path::Path) -> bool {
             use std::io::Read;
             let mut magic = [0u8; 4];
             if f.read_exact(&mut magic).is_ok() {
-                return matches!(
+                let is_binary = matches!(
                     magic,
                     [0xCF, 0xFA, 0xED, 0xFE] // Mach-O 64-bit (little-endian, Apple Silicon / Intel)
                     | [0xCE, 0xFA, 0xED, 0xFE] // Mach-O 32-bit (little-endian)
                     | [0xFE, 0xED, 0xFA, 0xCF] // Mach-O 64-bit (big-endian)
                     | [0xFE, 0xED, 0xFA, 0xCE] // Mach-O 32-bit (big-endian)
                     | [0xCA, 0xFE, 0xBA, 0xBE] // Universal/fat binary
-                    | [0x23, 0x21, _, _]        // Shebang script (#!/...)
                     | [0x7F, 0x45, 0x4C, 0x46] // ELF (Linux — valid on Linux hosts)
                 );
+                if is_binary {
+                    return true;
+                }
+                // Shebang script — verify the interpreter exists to avoid ENOENT at spawn.
+                // e.g. #!/usr/bin/env node → check /usr/bin/env exists
+                // e.g. #!/path/to/node → check /path/to/node exists
+                if magic[0] == 0x23 && magic[1] == 0x21 {
+                    use std::io::{BufRead, BufReader, Seek, SeekFrom};
+                    let _ = f.seek(SeekFrom::Start(0));
+                    let mut first_line = String::new();
+                    if BufReader::new(&f).read_line(&mut first_line).is_ok() {
+                        let shebang = first_line.trim_start_matches("#!").trim();
+                        // Extract interpreter path (first token before any args)
+                        let interpreter = shebang.split_whitespace().next().unwrap_or("");
+                        if !interpreter.is_empty() && std::path::Path::new(interpreter).exists() {
+                            return true;
+                        }
+                        // Interpreter not found — skip this script
+                        eprintln!(
+                            "[is_valid_executable] shebang interpreter '{}' not found, skipping {:?}",
+                            interpreter, path
+                        );
+                    }
+                    return false;
+                }
             }
         }
         false
@@ -214,184 +238,166 @@ fn find_git_bash() -> Option<String> {
     None
 }
 
-fn find_claude_binary() -> Option<String> {
-    // 1. Check if `claude` is already on the system PATH (highest priority)
+/// Check if a file is a native binary (Mach-O, PE, ELF, universal — NOT shebang scripts).
+fn is_native_binary(path: &std::path::Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
     #[cfg(target_os = "windows")]
     {
-        // Windows: use `where` via cmd with CREATE_NO_WINDOW to avoid flashing console.
-        // Prefer claude.cmd first — `where claude` may return the extensionless JS script
-        // which causes error 193 on Windows.
-        for query in ["claude.cmd", "claude"] {
-            if let Ok(output) = std::process::Command::new("cmd")
-                .args(["/C", "where", query])
-                .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                .output()
-            {
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    // `where` may return multiple lines; find the first valid executable
-                    for line in stdout.lines() {
-                        let path = line.trim().to_string();
-                        if path.is_empty() {
-                            continue;
-                        }
-                        let p = std::path::Path::new(&path);
-                        // Skip extensionless files (JS scripts) — they cause error 193
-                        if p.extension().is_none() {
-                            continue;
-                        }
-                        if is_valid_executable(p) {
-                            return Some(path);
-                        }
-                    }
-                }
+        if let Ok(mut f) = std::fs::File::open(path) {
+            use std::io::Read;
+            let mut magic = [0u8; 2];
+            if f.read_exact(&mut magic).is_ok() {
+                return magic == [0x4D, 0x5A]; // MZ (PE header)
             }
         }
+        false
     }
     #[cfg(not(target_os = "windows"))]
     {
-        let which_path = shell_with_timeout("sh", &["-l", "-c", "which claude"], "which claude");
-        if !which_path.is_empty() && is_valid_executable(std::path::Path::new(&which_path)) {
-            return Some(which_path);
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(metadata) = std::fs::metadata(path) else { return false };
+        if metadata.permissions().mode() & 0o111 == 0 { return false; }
+        if let Ok(mut f) = std::fs::File::open(path) {
+            use std::io::Read;
+            let mut magic = [0u8; 4];
+            if f.read_exact(&mut magic).is_ok() {
+                return matches!(
+                    magic,
+                    [0xCF, 0xFA, 0xED, 0xFE] | [0xCE, 0xFA, 0xED, 0xFE]
+                    | [0xFE, 0xED, 0xFA, 0xCF] | [0xFE, 0xED, 0xFA, 0xCE]
+                    | [0xCA, 0xFE, 0xBA, 0xBE] | [0x7F, 0x45, 0x4C, 0x46]
+                );
+            }
         }
+        false
     }
+}
+
+/// Collect directories to search for claude binary, in priority order.
+/// System/user paths first, app-local (self-deployed) paths last.
+fn collect_search_dirs() -> Vec<String> {
+    let mut dirs: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut push = |d: String| { if seen.insert(d.clone()) { dirs.push(d); } };
+
+    #[cfg(target_os = "windows")]
+    let bin_name = "claude.exe";
+    #[cfg(not(target_os = "windows"))]
+    let bin_name = "claude";
 
     if let Some(home) = dirs::home_dir() {
-        // 2. Platform-specific Claude desktop app bundled CLI
+        // 1. Claude Desktop bundled CLI (versioned dirs — highest priority)
         #[cfg(target_os = "windows")]
         {
-            // %LOCALAPPDATA%\Claude\claude-code\*\claude.exe
-            if let Some(local_app) = dirs::data_local_dir() {
-                let claude_code_dir = local_app.join("Claude").join("claude-code");
-                if let Some(bin) = find_newest_version_bin(&claude_code_dir, "claude.exe") {
-                    return Some(bin);
-                }
-            }
-            // %APPDATA%\Claude\claude-code\*\claude.exe
-            if let Some(app_data) = dirs::data_dir() {
-                let claude_code_dir = app_data.join("Claude").join("claude-code");
-                if let Some(bin) = find_newest_version_bin(&claude_code_dir, "claude.exe") {
-                    return Some(bin);
+            for base_fn in [dirs::data_local_dir, dirs::data_dir] {
+                if let Some(base) = base_fn() {
+                    let vdir = base.join("Claude").join("claude-code");
+                    if let Some(bin) = find_newest_version_bin(&vdir, bin_name) {
+                        if let Some(p) = std::path::Path::new(&bin).parent() {
+                            push(p.to_string_lossy().to_string());
+                        }
+                    }
                 }
             }
         }
         #[cfg(target_os = "macos")]
         {
-            let claude_code_dir = home.join("Library/Application Support/Claude/claude-code");
-            if let Some(bin) = find_newest_version_bin(&claude_code_dir, "claude") {
-                return Some(bin);
+            let vdir = home.join("Library/Application Support/Claude/claude-code");
+            if let Some(bin) = find_newest_version_bin(&vdir, bin_name) {
+                if let Some(p) = std::path::Path::new(&bin).parent() {
+                    push(p.to_string_lossy().to_string());
+                }
             }
         }
         #[cfg(target_os = "linux")]
-        {
-            // ~/.local/share/Claude/claude-code/*/claude
-            if let Some(data_dir) = dirs::data_dir() {
-                let claude_code_dir = data_dir.join("Claude").join("claude-code");
-                if let Some(bin) = find_newest_version_bin(&claude_code_dir, "claude") {
-                    return Some(bin);
+        if let Some(data_dir) = dirs::data_dir() {
+            let vdir = data_dir.join("Claude").join("claude-code");
+            if let Some(bin) = find_newest_version_bin(&vdir, bin_name) {
+                if let Some(p) = std::path::Path::new(&bin).parent() {
+                    push(p.to_string_lossy().to_string());
                 }
             }
         }
 
-        // 2b. Native binary install (~/.claude/local/claude)
-        // This is where `curl -fsSL https://claude.ai/install.sh | bash` puts it.
-        // Prefer native over npm to avoid Node.js version compatibility issues
-        // (e.g. --sdk-url bug on Node 22, see anthropics/claude-code#30774).
+        // 2. Native binary install (~/.claude/local/)
         #[cfg(not(target_os = "windows"))]
-        {
-            let native = home.join(".claude/local/claude");
-            if is_valid_executable(&native) {
-                return Some(native.to_string_lossy().to_string());
-            }
-        }
+        push(home.join(".claude/local").to_string_lossy().to_string());
         #[cfg(target_os = "windows")]
-        {
-            let native = home.join(".claude\\local\\claude.exe");
-            if is_valid_executable(&native) {
-                return Some(native.to_string_lossy().to_string());
-            }
-        }
+        push(home.join(".claude\\local").to_string_lossy().to_string());
 
-        // 3. Common global install paths
+        // 3. Common user-level install paths
         #[cfg(target_os = "windows")]
         {
-            // npm global: %APPDATA%\npm\claude.cmd
             if let Some(app_data) = dirs::data_dir() {
-                for name in ["claude.cmd", "claude.exe", "claude.ps1"] {
-                    let candidate = app_data.join("npm").join(name);
-                    if is_valid_executable(&candidate) {
-                        return Some(candidate.to_string_lossy().to_string());
-                    }
-                }
+                push(app_data.join("npm").to_string_lossy().to_string());
             }
-            // Scoop: ~/scoop/shims/claude.cmd
-            let scoop_candidate = home.join("scoop").join("shims").join("claude.cmd");
-            if is_valid_executable(&scoop_candidate) {
-                return Some(scoop_candidate.to_string_lossy().to_string());
-            }
-            // nvm-windows / fnm / volta node paths
-            for sub in [
-                "AppData\\Roaming\\nvm",
-                ".volta\\bin",
-                "AppData\\Local\\fnm_multishells",
-            ] {
-                let candidate = home.join(sub).join("claude.cmd");
-                if is_valid_executable(&candidate) {
-                    return Some(candidate.to_string_lossy().to_string());
-                }
-            }
+            push(home.join("scoop\\shims").to_string_lossy().to_string());
+            push(home.join(".volta\\bin").to_string_lossy().to_string());
         }
         #[cfg(not(target_os = "windows"))]
         {
-            for candidate in [
-                home.join(".npm-global/bin/claude"),
-                home.join(".local/bin/claude"),
-            ] {
-                if is_valid_executable(&candidate) {
-                    return Some(candidate.to_string_lossy().to_string());
-                }
-            }
+            push(home.join(".local/bin").to_string_lossy().to_string());
+            push(home.join(".npm-global/bin").to_string_lossy().to_string());
         }
     }
 
-    // 4. System-wide paths (Unix only)
+    // 4. System-wide paths
     #[cfg(not(target_os = "windows"))]
     {
-        for candidate in ["/usr/local/bin/claude", "/opt/homebrew/bin/claude"] {
-            if is_valid_executable(std::path::Path::new(candidate)) {
-                return Some(candidate.to_string());
-            }
-        }
+        push("/usr/local/bin".to_string());
+        push("/opt/homebrew/bin".to_string());
     }
 
-    // 5. App-local and npm-global (lowest priority — fallback for self-deployed CLI)
-    #[cfg(target_os = "windows")]
-    if let Some(npm_bin) = get_npm_global_bin() {
-        for name in &["claude.cmd", "claude.exe"] {
-            let path = npm_bin.join(name);
-            if is_valid_executable(&path) {
-                return Some(path.to_string_lossy().to_string());
-            }
-        }
+    // 5. Current process PATH + login shell PATH
+    let sep = if cfg!(windows) { ';' } else { ':' };
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    for entry in current_path.split(sep) {
+        if !entry.is_empty() { push(entry.to_string()); }
     }
-
-    if let Some(cli_dir) = cli_download_dir() {
-        #[cfg(target_os = "windows")]
-        let bin_name = "claude.exe";
-        #[cfg(not(target_os = "windows"))]
-        let bin_name = "claude";
-        let path = cli_dir.join(bin_name);
-        if path.exists() && is_valid_executable(&path) {
-            return Some(path.to_string_lossy().to_string());
-        }
-    }
-
     #[cfg(not(target_os = "windows"))]
+    {
+        for entry in login_shell_extra_path().split(':') {
+            if !entry.is_empty() { push(entry.to_string()); }
+        }
+    }
+
+    // 6. App-local paths (lowest priority — self-deployed CLI fallback)
+    if let Some(cli_dir) = cli_download_dir() {
+        push(cli_dir.to_string_lossy().to_string());
+    }
     if let Some(npm_bin) = get_npm_global_bin() {
-        for name in &["claude"] {
-            let path = npm_bin.join(name);
-            if is_valid_executable(&path) {
-                return Some(path.to_string_lossy().to_string());
+        push(npm_bin.to_string_lossy().to_string());
+    }
+
+    dirs
+}
+
+fn find_claude_binary() -> Option<String> {
+    let dirs = collect_search_dirs();
+
+    #[cfg(target_os = "windows")]
+    let names: &[&str] = &["claude.exe", "claude.cmd"];
+    #[cfg(not(target_os = "windows"))]
+    let names: &[&str] = &["claude"];
+
+    // Phase 1: prefer native binaries (Mach-O, PE, ELF) — no interpreter dependency
+    for dir in &dirs {
+        for name in names {
+            let candidate = std::path::Path::new(dir).join(name);
+            if is_native_binary(&candidate) {
+                return Some(candidate.to_string_lossy().to_string());
+            }
+        }
+    }
+
+    // Phase 2: accept any valid executable (including shebang scripts, .cmd wrappers)
+    for dir in &dirs {
+        for name in names {
+            let candidate = std::path::Path::new(dir).join(name);
+            if is_valid_executable(&candidate) {
+                return Some(candidate.to_string_lossy().to_string());
             }
         }
     }
@@ -399,121 +405,43 @@ fn find_claude_binary() -> Option<String> {
     None
 }
 
-/// Like find_claude_binary() but skips app-local and npm-global candidates.
+/// Like find_claude_binary() but skips app-local paths (cli_download_dir, npm-global).
 /// Used as a fallback when the primary binary hangs (e.g. broken Bun-compiled binary).
 fn find_claude_binary_skip_app_local() -> Option<String> {
-    // 1. System PATH
+    let dirs = collect_search_dirs();
+    let app_local_prefixes: Vec<String> = [cli_download_dir(), get_npm_global_bin()]
+        .into_iter()
+        .flatten()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+
+    let is_app_local = |dir: &str| -> bool {
+        app_local_prefixes.iter().any(|prefix| dir.starts_with(prefix.as_str()))
+    };
+
     #[cfg(target_os = "windows")]
-    {
-        for query in ["claude.cmd", "claude"] {
-            if let Ok(output) = std::process::Command::new("cmd")
-                .args(["/C", "where", query])
-                .creation_flags(0x08000000)
-                .output()
-            {
-                if output.status.success() {
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    for line in stdout.lines() {
-                        let path = line.trim().to_string();
-                        if path.is_empty() {
-                            continue;
-                        }
-                        let p = std::path::Path::new(&path);
-                        if p.extension().is_none() {
-                            continue;
-                        }
-                        if is_valid_executable(p) {
-                            return Some(path);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let names: &[&str] = &["claude.exe", "claude.cmd"];
     #[cfg(not(target_os = "windows"))]
-    {
-        let which_path = shell_with_timeout("sh", &["-l", "-c", "which claude"], "which claude");
-        if !which_path.is_empty() && is_valid_executable(std::path::Path::new(&which_path)) {
-            return Some(which_path);
-        }
-    }
+    let names: &[&str] = &["claude"];
 
-    if let Some(home) = dirs::home_dir() {
-        // 2. Claude desktop app bundled CLI
-        #[cfg(target_os = "windows")]
-        {
-            if let Some(local_app) = dirs::data_local_dir() {
-                let claude_code_dir = local_app.join("Claude").join("claude-code");
-                if let Some(bin) = find_newest_version_bin(&claude_code_dir, "claude.exe") {
-                    return Some(bin);
-                }
-            }
-            if let Some(app_data) = dirs::data_dir() {
-                let claude_code_dir = app_data.join("Claude").join("claude-code");
-                if let Some(bin) = find_newest_version_bin(&claude_code_dir, "claude.exe") {
-                    return Some(bin);
-                }
-            }
-        }
-        #[cfg(target_os = "macos")]
-        {
-            let claude_code_dir = home.join("Library/Application Support/Claude/claude-code");
-            if let Some(bin) = find_newest_version_bin(&claude_code_dir, "claude") {
-                return Some(bin);
-            }
-        }
-        // 2b. Native binary install (~/.claude/local/claude)
-        #[cfg(not(target_os = "windows"))]
-        {
-            let native = home.join(".claude/local/claude");
-            if is_valid_executable(&native) {
-                return Some(native.to_string_lossy().to_string());
-            }
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let native = home.join(".claude\\local\\claude.exe");
-            if is_valid_executable(&native) {
-                return Some(native.to_string_lossy().to_string());
-            }
-        }
-
-        // 3. Common global install paths
-        #[cfg(target_os = "windows")]
-        {
-            let scoop_candidate = home.join("scoop").join("shims").join("claude.cmd");
-            if is_valid_executable(&scoop_candidate) {
-                return Some(scoop_candidate.to_string_lossy().to_string());
-            }
-            for sub in [
-                "AppData\\Roaming\\nvm",
-                ".volta\\bin",
-                "AppData\\Local\\fnm_multishells",
-            ] {
-                let candidate = home.join(sub).join("claude.cmd");
-                if is_valid_executable(&candidate) {
-                    return Some(candidate.to_string_lossy().to_string());
-                }
-            }
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            for candidate in [
-                home.join(".npm-global/bin/claude"),
-                home.join(".local/bin/claude"),
-            ] {
-                if is_valid_executable(&candidate) {
-                    return Some(candidate.to_string_lossy().to_string());
-                }
+    // Phase 1: native binaries, skip app-local
+    for dir in &dirs {
+        if is_app_local(dir) { continue; }
+        for name in names {
+            let candidate = std::path::Path::new(dir).join(name);
+            if is_native_binary(&candidate) {
+                return Some(candidate.to_string_lossy().to_string());
             }
         }
     }
 
-    #[cfg(not(target_os = "windows"))]
-    {
-        for candidate in ["/usr/local/bin/claude", "/opt/homebrew/bin/claude"] {
-            if is_valid_executable(std::path::Path::new(candidate)) {
-                return Some(candidate.to_string());
+    // Phase 2: any executable, skip app-local
+    for dir in &dirs {
+        if is_app_local(dir) { continue; }
+        for name in names {
+            let candidate = std::path::Path::new(dir).join(name);
+            if is_valid_executable(&candidate) {
+                return Some(candidate.to_string_lossy().to_string());
             }
         }
     }
@@ -1672,6 +1600,36 @@ async fn start_claude_session(
                 if alt_bin == claude_bin {
                     return Err(format!(
                         "Failed to spawn claude (tried '{}', binary is malformed/corrupt — \
+                         please reinstall CLI from Settings): {}",
+                        claude_bin, e
+                    ));
+                }
+                eprintln!("Retrying with alternative: {}", alt_bin);
+                spawn_unix(&alt_bin).map_err(|e2| {
+                    format!(
+                        "Failed to spawn claude (tried '{}' then '{}'): {}",
+                        claude_bin, alt_bin, e2
+                    )
+                })?
+            }
+            Err(e) if e.raw_os_error() == Some(2) => {
+                // ENOENT — binary or its shebang interpreter not found.
+                // Common cause: npm-installed claude script has a shebang pointing to
+                // an app-local Node.js that was deleted or moved.
+                eprintln!(
+                    "ENOENT on '{}' (binary or interpreter not found), trying alternative...",
+                    claude_bin
+                );
+                // Remove the broken npm-global script so it doesn't get picked up again
+                let broken_path = std::path::Path::new(&claude_bin);
+                if broken_path.exists() {
+                    let _ = std::fs::remove_file(broken_path);
+                    eprintln!("Removed broken script: {}", claude_bin);
+                }
+                let alt_bin = find_claude_binary().unwrap_or_else(|| "claude".to_string());
+                if alt_bin == claude_bin || alt_bin == "claude" {
+                    return Err(format!(
+                        "Failed to spawn claude (tried '{}', interpreter not found — \
                          please reinstall CLI from Settings): {}",
                         claude_bin, e
                     ));

@@ -73,7 +73,7 @@ export function AddProviderMenu({
 
   return createPortal(
     <div ref={menuRef} style={style}
-      className="w-[300px] rounded-xl border border-border-subtle bg-bg-primary shadow-lg p-3 space-y-2">
+      className="w-[300px] rounded-xl border border-border-subtle bg-bg-primary/95 backdrop-blur-xl shadow-lg p-3 space-y-2">
       {/* Preset grid */}
       <div>
         <span className="text-xs text-text-tertiary font-medium mb-1.5 block">
@@ -81,25 +81,21 @@ export function AddProviderMenu({
         </span>
         <div className="grid grid-cols-2 gap-1.5">
           {PROVIDER_PRESETS.map((preset) => {
-            const alreadyAdded = existingPresets.has(preset.id);
+            const addedCount = providers.filter((p) => p.preset === preset.id).length;
             return (
               <button
                 key={preset.id}
-                disabled={alreadyAdded}
                 onClick={() => {
                   onAddFromPreset(preset);
                   onClose();
                 }}
-                className={`text-left px-2.5 py-2 rounded-lg text-[13px] transition-smooth
-                  ${alreadyAdded
-                    ? 'text-text-tertiary cursor-default opacity-50'
-                    : 'text-text-muted hover:bg-bg-secondary border border-transparent hover:border-border-subtle'
-                  }`}
+                className="text-left px-2.5 py-2 rounded-lg text-[13px] transition-smooth
+                  text-text-muted hover:bg-bg-secondary border border-transparent hover:border-border-subtle"
               >
                 {preset.name}
-                {alreadyAdded && (
+                {addedCount > 0 && (
                   <span className="text-[11px] text-text-tertiary ml-1">
-                    {t('provider.alreadyAdded')}
+                    ×{addedCount}
                   </span>
                 )}
               </button>

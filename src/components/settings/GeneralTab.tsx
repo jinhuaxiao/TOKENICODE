@@ -1,9 +1,17 @@
 import { useRef, useCallback, useState } from 'react';
-import { useSettingsStore, MODEL_OPTIONS, ColorTheme } from '../../stores/settingsStore';
+import { useSettingsStore, MODEL_OPTIONS, ColorTheme, type ModelId } from '../../stores/settingsStore';
+import { useProviderStore } from '../../stores/providerStore';
 import { useT } from '../../lib/i18n';
 import { AiAvatar } from '../shared/AiAvatar';
 import { UserAvatar } from '../shared/UserAvatar';
 import { AvatarCropModal } from './AvatarCropModal';
+
+const TIER_MAP: Record<ModelId, string> = {
+  'claude-opus-4-6': 'opus',
+  'claude-opus-4-6-1m': 'opus',
+  'claude-sonnet-4-6': 'sonnet',
+  'claude-haiku-4-5-20251001': 'haiku',
+};
 
 const COLOR_THEMES: { id: ColorTheme; labelKey: string; preview: string; previewDark: string }[] = [
   {
@@ -62,6 +70,10 @@ function ThemePreview({ color }: { color: string }) {
 
 export function GeneralTab() {
   const t = useT();
+  const activeProvider = useProviderStore((s) => {
+    if (!s.activeProviderId) return null;
+    return s.providers.find((p) => p.id === s.activeProviderId) ?? null;
+  });
   const theme = useSettingsStore((s) => s.theme);
   const colorTheme = useSettingsStore((s) => s.colorTheme);
   const locale = useSettingsStore((s) => s.locale);
@@ -290,7 +302,12 @@ export function GeneralTab() {
                     <path d="M3 8l4 4 6-7" />
                   </svg>
                 )}
-                {model.short}
+                {(() => {
+                  if (!activeProvider) return model.short;
+                  const tier = TIER_MAP[model.id];
+                  const mapping = activeProvider.modelMappings.find((mm) => mm.tier === tier);
+                  return mapping?.providerModel || model.short;
+                })()}
               </button>
             ))}
           </div>

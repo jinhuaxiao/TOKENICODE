@@ -39,10 +39,10 @@ export function ProviderManager({ alwaysExpanded = false }: { alwaysExpanded?: b
   const activeLabel = activeProvider ? activeProvider.name : t('provider.inherit');
 
   const handleAddFromPreset = useCallback((preset: PresetProvider) => {
-    if (providers.some((p) => p.preset === preset.id)) return;
+    const existingCount = providers.filter((p) => p.preset === preset.id).length;
 
     addProvider({
-      name: preset.name,
+      name: existingCount > 0 ? `${preset.name} (${existingCount + 1})` : preset.name,
       baseUrl: preset.baseUrl,
       apiFormat: preset.apiFormat,
       modelMappings: [

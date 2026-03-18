@@ -16,6 +16,7 @@ import { SlashCommandPopover, getFilteredCommandList } from './SlashCommandPopov
 import { useCommandStore } from '../../stores/commandStore';
 import { envFingerprint, resolveModelForProvider, resolveModelOrError } from '../../lib/api-provider';
 import { useProviderStore } from '../../stores/providerStore';
+import { PROVIDER_PRESETS } from '../../lib/provider-presets';
 import { stripAnsi } from '../../lib/strip-ansi';
 import { usePlanPanelStore } from './ChatPanel';
 import { PlanReviewCard } from './PlanReviewCard';
@@ -40,6 +41,13 @@ function ThinkLevelSelector({ disabled = false }: { disabled?: boolean }) {
   const setThinkingLevel = useSettingsStore((s) => s.setThinkingLevel);
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+
+  const thinkingSupport = useProviderStore((s) => {
+    if (!s.activeProviderId) return 'full';
+    const provider = s.providers.find((p) => p.id === s.activeProviderId);
+    if (!provider?.preset) return 'unknown';
+    return PROVIDER_PRESETS.find((p) => p.id === provider.preset)?.thinkingSupport ?? 'unknown';
+  });
 
   useEffect(() => {
     if (!open) return;
@@ -105,6 +113,11 @@ function ThinkLevelSelector({ disabled = false }: { disabled?: boolean }) {
               </button>
             );
           })}
+          {thinkingSupport === 'ignored' && (
+            <div className="px-3 py-1.5 text-[10px] text-text-tertiary border-t border-border-subtle mt-1">
+              {t('think.providerIgnored')}
+            </div>
+          )}
         </div>
       )}
     </div>

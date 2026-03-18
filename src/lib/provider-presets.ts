@@ -4,6 +4,10 @@ export interface PresetProvider {
   baseUrl: string;
   apiFormat: 'anthropic' | 'openai';
   extra_env: Record<string, string>;
+  /** URL to the provider's API key management page */
+  keyUrl?: string;
+  /** Provider-level thinking support: full = native, ignored = param silently dropped, unknown = untested */
+  thinkingSupport?: 'full' | 'ignored' | 'unknown';
   /** Default model for all tiers (non-Claude providers) */
   defaultModel?: string;
   /** Per-tier default models (takes precedence over defaultModel) */
@@ -21,13 +25,8 @@ export const PROVIDER_PRESETS: PresetProvider[] = [
     baseUrl: 'https://api.anthropic.com',
     apiFormat: 'anthropic',
     extra_env: {},
-  },
-  {
-    id: 'deepseek',
-    name: 'DeepSeek',
-    baseUrl: 'https://api.deepseek.com',
-    apiFormat: 'openai',
-    extra_env: {},
+    keyUrl: 'https://console.anthropic.com/account/keys',
+    thinkingSupport: 'full',
   },
   {
     id: 'zhipu',
@@ -35,6 +34,8 @@ export const PROVIDER_PRESETS: PresetProvider[] = [
     baseUrl: 'https://open.bigmodel.cn/api/anthropic',
     apiFormat: 'anthropic',
     extra_env: {},
+    keyUrl: 'https://bigmodel.cn/usercenter/proj-mgmt/apikeys',
+    thinkingSupport: 'full',
     defaultModels: {
       opus: 'glm-5',
       sonnet: 'glm-5-turbo',
@@ -42,19 +43,18 @@ export const PROVIDER_PRESETS: PresetProvider[] = [
     },
   },
   {
-    id: 'qwen-coder',
-    name: 'Qwen Coder',
-    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    apiFormat: 'openai',
-    extra_env: {},
-  },
-  {
     id: 'kimi',
     name: 'Kimi',
-    baseUrl: 'https://api.kimi.com/coding/',
+    baseUrl: 'https://api.moonshot.cn/anthropic/',
     apiFormat: 'anthropic',
     extra_env: {},
-    defaultModel: 'kimi-for-coding',
+    keyUrl: 'https://platform.moonshot.cn/console/api-keys',
+    thinkingSupport: 'full',
+    defaultModels: {
+      opus: 'kimi-k2.5',
+      sonnet: 'kimi-k2',
+      haiku: 'kimi-k2-turbo-preview',
+    },
   },
   {
     id: 'minimax',
@@ -62,6 +62,26 @@ export const PROVIDER_PRESETS: PresetProvider[] = [
     baseUrl: 'https://api.minimaxi.com/anthropic',
     apiFormat: 'anthropic',
     extra_env: {},
-    defaultModel: 'MiniMax-M2.5',
+    keyUrl: 'https://platform.minimaxi.com/user-center/basic-information/interface-key',
+    thinkingSupport: 'ignored',
+    defaultModels: {
+      opus: 'MiniMax-M2.5',
+      sonnet: 'MiniMax-M2.1',
+      haiku: 'MiniMax-M2',
+    },
+  },
+  {
+    id: 'qwen',
+    name: '通义千问',
+    baseUrl: 'https://dashscope.aliyuncs.com/apps/anthropic',
+    apiFormat: 'anthropic',
+    extra_env: {},
+    keyUrl: 'https://bailian.console.aliyun.com/?apiKey=1',
+    thinkingSupport: 'unknown',
+    defaultModels: {
+      opus: 'qwen3-max',
+      sonnet: 'qwen3.5-plus',
+      haiku: 'qwen3.5-flash',
+    },
   },
 ];

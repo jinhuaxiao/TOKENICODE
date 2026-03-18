@@ -43,6 +43,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'think.medium': '中思考',
     'think.high': '深思考',
     'think.max': '最深思考',
+    'think.providerIgnored': '当前供应商可能不支持 thinking 设置',
     'input.shortcutHint': '⏎ 发送 · {mod}⏎ 换行',
 
     // MessageBubble
@@ -333,6 +334,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'provider.baseUrlPlaceholder': 'https://api.example.com',
     'provider.apiKey': 'API Key',
     'provider.apiKeyPlaceholder': '输入 API Key...',
+    'provider.getApiKey': '获取 Key →',
     'provider.format': 'API 格式',
     'provider.formatAnthropic': 'Anthropic Messages（原生）',
     'provider.formatOpenai': 'OpenAI Chat Completions',
@@ -345,6 +347,9 @@ const messages: Record<Locale, Record<string, string>> = {
     'provider.opusPlaceholder': '如 claude-opus-4-6',
     'provider.sonnetPlaceholder': '如 claude-sonnet-4-6',
     'provider.haikuPlaceholder': '如 claude-haiku-4-5-20251001',
+    'provider.modelIdPlaceholder': 'Model ID',
+    'provider.providerModelPlaceholder': '供应商模型名',
+    'provider.addModelMapping': '添加模型映射',
     'provider.extraEnv': '环境变量',
     'provider.extraEnvHint': '注入到 CLI 进程的自定义环境变量。空值表示删除该变量。',
     'provider.extraEnvValuePlaceholder': '值（留空=删除）',
@@ -677,6 +682,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'think.medium': 'Think Med',
     'think.high': 'Think High',
     'think.max': 'Think Max',
+    'think.providerIgnored': 'This provider may not support thinking settings',
     'input.shortcutHint': '⏎ Send · {mod}⏎ New line',
 
     // MessageBubble
@@ -967,6 +973,7 @@ const messages: Record<Locale, Record<string, string>> = {
     'provider.baseUrlPlaceholder': 'https://api.example.com',
     'provider.apiKey': 'API Key',
     'provider.apiKeyPlaceholder': 'Enter API Key...',
+    'provider.getApiKey': 'Get Key →',
     'provider.format': 'API Format',
     'provider.formatAnthropic': 'Anthropic Messages (Native)',
     'provider.formatOpenai': 'OpenAI Chat Completions',
@@ -979,6 +986,9 @@ const messages: Record<Locale, Record<string, string>> = {
     'provider.opusPlaceholder': 'e.g. claude-opus-4-6',
     'provider.sonnetPlaceholder': 'e.g. claude-sonnet-4-6',
     'provider.haikuPlaceholder': 'e.g. claude-haiku-4-5-20251001',
+    'provider.modelIdPlaceholder': 'Model ID',
+    'provider.providerModelPlaceholder': 'Provider model name',
+    'provider.addModelMapping': 'Add model mapping',
     'provider.extraEnv': 'Environment Variables',
     'provider.extraEnvHint': 'Custom env vars injected into the CLI process. Empty value removes the variable.',
     'provider.extraEnvValuePlaceholder': 'Value (empty=remove)',

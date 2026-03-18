@@ -16,7 +16,15 @@ export function resolveModelOrError(selectedModel: ModelId): ModelResolution {
   const provider = useProviderStore.getState().getActive();
   if (!provider) return { ok: true, model: selectedModel };
 
-  // Map UI model ID to tier
+  // 1. Check direct model ID mapping first (e.g. 'claude-opus-4-6-1m' → 'glm-5-1m')
+  const directMapping = provider.modelMappings.find(
+    (m) => m.tier === selectedModel && m.providerModel,
+  );
+  if (directMapping?.providerModel) {
+    return { ok: true, model: directMapping.providerModel };
+  }
+
+  // 2. Fall back to tier mapping
   const tierMap: Record<ModelId, 'opus' | 'sonnet' | 'haiku'> = {
     'claude-opus-4-6': 'opus',
     'claude-opus-4-6-1m': 'opus',

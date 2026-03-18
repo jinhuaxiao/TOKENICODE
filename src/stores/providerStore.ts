@@ -2,7 +2,8 @@ import { create } from 'zustand';
 import { bridge, type ProvidersFile } from '../lib/tauri-bridge';
 
 export interface ModelMapping {
-  tier: 'opus' | 'sonnet' | 'haiku';
+  /** Standard tier ('opus'|'sonnet'|'haiku') or a specific model ID for direct mapping */
+  tier: string;
   providerModel: string;
 }
 

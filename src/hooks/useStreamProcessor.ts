@@ -1306,10 +1306,15 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
 
           const switchedFlag = meta.providerSwitched || meta.modelSwitched;
           const pendingText = meta.providerSwitchPendingText || meta.modelSwitchPendingText;
-          if (switchedFlag && isThinkingSignatureError && pendingText) {
-            const switchType = meta.modelSwitched ? '模型' : 'API 提供商';
+          // Find last user message as fallback retry text when no pendingText is set
+          const lastUserMsg = !pendingText
+            ? [...useChatStore.getState().messages].reverse().find((m) => m.role === 'user')?.content
+            : undefined;
+          const retryCandidate = pendingText || (typeof lastUserMsg === 'string' ? lastUserMsg : undefined);
+          if (isThinkingSignatureError && retryCandidate) {
+            const switchType = switchedFlag ? (meta.modelSwitched ? '模型' : 'API 提供商') : '会话';
             console.warn(`[TOKENICODE] Thinking signature error after ${switchType} switch — auto-retrying without resume`);
-            const retryText = pendingText;
+            const retryText = retryCandidate;
 
             // Kill the current (failed) process
             const failedStdinId = meta.stdinId;
