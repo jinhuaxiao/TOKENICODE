@@ -6,6 +6,14 @@ All notable changes to TOKENICODE will be documented in this file.
 
 ---
 
+## [0.8.19] - 2026-03-19
+
+### Added
+
+- **小米 MiMo Provider 预设** — 新增小米 MiMo 大模型预设（mimo-v2-pro / mimo-v2-omni / mimo-v2-flash），Anthropic 协议兼容
+
+---
+
 ## [0.8.18] - 2026-03-19
 
 ### Fixed
