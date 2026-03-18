@@ -96,9 +96,9 @@ export const PROVIDER_PRESETS: PresetProvider[] = [
     keyUrl: 'https://platform.xiaomimimo.com/',
     thinkingSupport: 'unknown',
     defaultModels: {
-      opus: 'mimo-v2-pro',
+      opus: 'mimo-v2-pro[1m]',
       sonnet: 'mimo-v2-omni',
-      haiku: 'mimo-v2-flash',
+      haiku: 'mimo-v2-pro',
     },
   },
 ];
