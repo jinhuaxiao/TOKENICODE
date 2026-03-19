@@ -23,6 +23,8 @@ export interface StartSessionParams {
    *  "acceptEdits" | "default" | "plan" | "bypassPermissions"
    *  When not "bypassPermissions", enables structured permission requests via SDK protocol. */
   permission_mode?: string;
+  /** Additional environment variables to inject into the CLI process (e.g. GEMINI_API_KEY) */
+  extra_env?: Record<string, string>;
 }
 
 export interface SessionInfo {

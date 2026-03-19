@@ -23,6 +23,8 @@ import { PlanReviewCard } from './PlanReviewCard';
 import { PermissionCard } from './PermissionCard';
 import { QuestionCard } from './QuestionCard';
 import { TiptapEditor, type TiptapEditorHandle } from './TiptapEditor';
+import { useTeamStore } from '../../stores/teamStore';
+import { generateTeamPrompt } from '../../lib/team-prompt';
 // drag-state import removed — tree drag handled by ChatPanel
 
 /** Thinking effort level configuration data */
@@ -118,6 +120,132 @@ function ThinkLevelSelector({ disabled = false }: { disabled?: boolean }) {
               {t('think.providerIgnored')}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Team Mode toggle button with popover for backend selection */
+function TeamModeButton({ disabled = false }: { disabled?: boolean }) {
+  const t = useT();
+  const teamModeEnabled = useSettingsStore((s) => s.teamModeEnabled);
+  const setTeamModeEnabled = useSettingsStore((s) => s.setTeamModeEnabled);
+  const teamSearchBackend = useSettingsStore((s) => s.teamSearchBackend);
+  const setTeamSearchBackend = useSettingsStore((s) => s.setTeamSearchBackend);
+  const geminiApiKey = useSettingsStore((s) => s.geminiApiKey);
+  const setGeminiApiKey = useSettingsStore((s) => s.setGeminiApiKey);
+  const geminiSearchModel = useSettingsStore((s) => s.geminiSearchModel);
+  const setGeminiSearchModel = useSettingsStore((s) => s.setGeminiSearchModel);
+  const [showPopover, setShowPopover] = useState(false);
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => {
+          if (!disabled) {
+            if (teamModeEnabled) {
+              // If enabled, clicking toggles the popover for settings
+              setShowPopover(!showPopover);
+            } else {
+              // If disabled, enable and show popover
+              setTeamModeEnabled(true);
+              useTeamStore.getState().clearTeamState();
+              setShowPopover(true);
+            }
+          }
+        }}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          if (!disabled && teamModeEnabled) {
+            setTeamModeEnabled(false);
+            setShowPopover(false);
+          }
+        }}
+        disabled={disabled}
+        className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs transition-smooth
+          ${teamModeEnabled
+            ? 'bg-accent/15 text-accent font-medium'
+            : 'text-text-tertiary hover:text-text-primary hover:bg-bg-secondary'
+          }
+          ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+        title={t('team.toggle')}
+      >
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" strokeWidth="1.5" className="flex-shrink-0">
+          <circle cx="8" cy="5" r="3" />
+          <circle cx="3" cy="11" r="2" />
+          <circle cx="13" cy="11" r="2" />
+          <path d="M5 7.5L3 9M11 7.5L13 9" strokeLinecap="round" />
+        </svg>
+        <span className="text-[10px]">{t('team.mode')}</span>
+      </button>
+      {showPopover && teamModeEnabled && (
+        <div className="absolute bottom-full left-0 mb-2 w-64 bg-bg-primary border border-border
+          rounded-xl shadow-lg p-3 z-50 space-y-3">
+          {/* Close / disable row */}
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-text-primary">{t('team.searchBackend')}</span>
+            <button
+              onClick={() => { setTeamModeEnabled(false); setShowPopover(false); }}
+              className="text-[10px] text-text-tertiary hover:text-text-primary"
+            >
+              {t('team.mode')} OFF
+            </button>
+          </div>
+          {/* Backend selector */}
+          <div className="flex gap-1">
+            <button
+              onClick={() => setTeamSearchBackend('grok')}
+              className={`flex-1 px-2 py-1.5 rounded-lg text-xs transition-smooth
+                ${teamSearchBackend === 'grok'
+                  ? 'bg-accent/15 text-accent font-medium'
+                  : 'text-text-tertiary hover:text-text-primary hover:bg-bg-secondary'}`}
+            >
+              {t('team.backend.grok')}
+            </button>
+            <button
+              onClick={() => setTeamSearchBackend('gemini')}
+              className={`flex-1 px-2 py-1.5 rounded-lg text-xs transition-smooth
+                ${teamSearchBackend === 'gemini'
+                  ? 'bg-accent/15 text-accent font-medium'
+                  : 'text-text-tertiary hover:text-text-primary hover:bg-bg-secondary'}`}
+            >
+              {t('team.backend.gemini')}
+            </button>
+          </div>
+          {/* Gemini settings (only when gemini selected) */}
+          {teamSearchBackend === 'gemini' && (
+            <div className="space-y-2">
+              <div>
+                <label className="text-[10px] text-text-tertiary block mb-1">{t('team.geminiApiKey')}</label>
+                <input
+                  type="password"
+                  value={geminiApiKey}
+                  onChange={(e) => setGeminiApiKey(e.target.value)}
+                  placeholder="AIza..."
+                  className="w-full px-2 py-1 text-xs bg-bg-secondary border border-border rounded-lg
+                    text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent"
+                />
+              </div>
+              <div>
+                <label className="text-[10px] text-text-tertiary block mb-1">{t('team.geminiModel')}</label>
+                <input
+                  type="text"
+                  value={geminiSearchModel}
+                  onChange={(e) => setGeminiSearchModel(e.target.value)}
+                  placeholder="gemini-2.5-flash"
+                  className="w-full px-2 py-1 text-xs bg-bg-secondary border border-border rounded-lg
+                    text-text-primary placeholder-text-tertiary focus:outline-none focus:border-accent"
+                />
+              </div>
+              {!geminiApiKey && (
+                <p className="text-[10px] text-orange-500">{t('team.geminiApiKeyRequired')}</p>
+              )}
+            </div>
+          )}
+          {/* Click outside to close */}
+          <div className="fixed inset-0 -z-10" onClick={() => setShowPopover(false)} />
         </div>
       )}
     </div>
@@ -743,6 +871,20 @@ export function InputBar() {
       text = `${text}\n\n${t('input.attachedFiles')}\n${filePaths}`;
     }
 
+    // Team Mode: prepend system prompt for first message in session
+    const { teamModeEnabled, teamMaxRounds, teamSearchBackend, geminiSearchModel, locale } = useSettingsStore.getState();
+    if (teamModeEnabled) {
+      const existingStdinForTeam = useChatStore.getState().sessionMeta.stdinId;
+      const hasMessages = useChatStore.getState().messages.length > 0;
+      if (!existingStdinForTeam && !hasMessages) {
+        // First message in a new session — inject team prompt
+        const teamPrompt = generateTeamPrompt(locale, teamMaxRounds, teamSearchBackend, geminiSearchModel);
+        text = `${teamPrompt}\n\n---\n\n${text}`;
+      }
+      // Clear previous team state for new searches
+      useTeamStore.getState().clearTeamState();
+    }
+
     setInputSync('');
 
     // Silent restart: skip user message bubble (Code mode ExitPlanMode auto-recovery)
@@ -1039,6 +1181,13 @@ export function InputBar() {
         // mode switch is visible even when called via rAF.
         const liveSessionMode = useSettingsStore.getState().sessionMode;
         console.log('[TOKENICODE:session] starting session', { cwd, stdinId: preGeneratedId, mode: liveSessionMode, provider: useProviderStore.getState().activeProviderId });
+        // Build extra_env for Team Mode (e.g. Gemini API Key)
+        const extraEnv: Record<string, string> = {};
+        const { teamModeEnabled: tmEnabled, teamSearchBackend: tmBackend, geminiApiKey: tmGeminiKey } = useSettingsStore.getState();
+        if (tmEnabled && tmBackend === 'gemini' && tmGeminiKey) {
+          extraEnv['GEMINI_API_KEY'] = tmGeminiKey;
+        }
+
         const session = await bridge.startSession({
           prompt: text,
           cwd,
@@ -1049,12 +1198,16 @@ export function InputBar() {
           session_mode: (liveSessionMode === 'ask' || liveSessionMode === 'plan') ? liveSessionMode : undefined,
           provider_id: useProviderStore.getState().activeProviderId || undefined,
           permission_mode: mapSessionModeToPermissionMode(liveSessionMode),
+          ...(Object.keys(extraEnv).length > 0 ? { extra_env: extraEnv } : {}),
         });
         console.log('[TOKENICODE:session] started successfully', { sessionId: session.session_id, pid: session.pid, cli: session.cli_path });
 
         // Store both: session_id for tracking, stdinId (preGeneratedId) for stdin communication
         setSessionMeta({ sessionId: session.session_id, stdinId: preGeneratedId, envFingerprint: envFingerprint(), spawnedModel: resolveModelForProvider(selectedModel) });
         // Note: stdinId → tabId mapping already registered before listener setup (TK-329)
+
+        // If this session was triggered by IM, register the real stdinId for IM routing
+        { const { registerIMRouteForSession } = await import('../../stores/imStore'); registerIMRouteForSession(preGeneratedId); }
 
         // Track the session and refresh conversation list
         // Skip desk_* IDs — they pollute tracked_sessions.txt (multi-session isolation fix)
@@ -1086,6 +1239,20 @@ export function InputBar() {
 
   // Keep ref in sync so executeImmediateCommand can call latest handleSubmit
   handleSubmitRef.current = handleSubmit;
+
+  // Watch for IM programmatic submit requests
+  const imPendingSubmit = useChatStore((s) => s.imPendingSubmit);
+  useEffect(() => {
+    if (!imPendingSubmit) return;
+    // Clear the request immediately to avoid re-triggering
+    useChatStore.getState().setImPendingSubmit(null);
+    // Set the text as inputDraft so handleSubmit picks it up
+    useChatStore.getState().setInputDraft(imPendingSubmit.text);
+    // Trigger submit on next frame (after inputDraft is set)
+    requestAnimationFrame(() => {
+      handleSubmitRef.current();
+    });
+  }, [imPendingSubmit]);
 
   // handleStreamMessage and handleBackgroundStreamMessage are provided by
   // useStreamProcessor hook (see src/hooks/useStreamProcessor.ts).
@@ -1475,6 +1642,9 @@ export function InputBar() {
 
           {/* Think toggle */}
           <ThinkLevelSelector disabled={isRunning} />
+
+          {/* Team Mode toggle */}
+          <TeamModeButton disabled={isRunning} />
 
           {/* Rewind button */}
           {showRewind && (

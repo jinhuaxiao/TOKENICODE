@@ -4,6 +4,7 @@ import { useSessionStore } from '../../stores/sessionStore';
 import { ConversationList } from '../conversations/ConversationList';
 import { useT } from '../../lib/i18n';
 import { useAgentStore } from '../../stores/agentStore';
+import { useTeamStore } from '../../stores/teamStore';
 import { IS_ALPHA } from '../../lib/edition';
 
 /** Map raw model ID to friendly display name */
@@ -81,6 +82,7 @@ export function Sidebar() {
         if (currentTabId) {
           useChatStore.getState().saveToCache(currentTabId);
           useAgentStore.getState().saveToCache(currentTabId);
+          useTeamStore.getState().saveToCache(currentTabId);
         }
 
         // Deselect current session FIRST so background stream routing works

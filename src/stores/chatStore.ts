@@ -76,6 +76,15 @@ export interface ChatMessage {
   subAgentDepth?: number;
   // CLI checkpoint UUID for file restoration (from --replay-user-messages)
   checkpointUuid?: string;
+  // Team Mode: marks Grok search tool calls for special rendering
+  teamToolType?: 'grok-search' | 'gemini-search';
+  teamRound?: number;
+  // IM source info (only present for messages from IM channels)
+  imSource?: {
+    channel: string;   // "telegram", "discord", etc.
+    chatId: string;
+    sender: string;
+  };
 }
 
 export interface SessionMeta {
@@ -204,6 +213,10 @@ interface ChatState {
   /** Clear pending user messages without returning them */
   clearPendingMessages: () => void;
 
+  /** IM programmatic submit: set by IM handler, consumed by InputBar */
+  imPendingSubmit: { text: string; imSource: { channel: string; chatId: string; sender: string } } | null;
+  setImPendingSubmit: (req: { text: string; imSource: { channel: string; chatId: string; sender: string } } | null) => void;
+
   /** Rewind conversation to a specific message index (truncates messages[]) */
   rewindToTurn: (startMsgIdx: number) => void;
 
@@ -250,6 +263,7 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   inputDraft: '',
   pendingAttachments: [],
   pendingUserMessages: [],
+  imPendingSubmit: null,
   sessionCache: new Map(),
 
   addMessage: (message) =>
@@ -363,6 +377,8 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   },
 
   clearPendingMessages: () => set({ pendingUserMessages: [] }),
+
+  setImPendingSubmit: (req) => set({ imPendingSubmit: req }),
 
   rewindToTurn: (startMsgIdx) =>
     set((state) => {

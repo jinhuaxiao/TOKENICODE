@@ -15,6 +15,8 @@ import { useChatStore } from './stores/chatStore';
 import { useSessionStore } from './stores/sessionStore';
 import { APP_NAME, IS_ALPHA } from './lib/edition';
 import { useAgentStore } from './stores/agentStore';
+import { useTeamStore } from './stores/teamStore';
+import { initIMListeners } from './stores/imStore';
 import { bridge, onFileChange } from './lib/tauri-bridge';
 import { useAutoUpdateCheck } from './hooks/useAutoUpdateCheck';
 import { useT } from './lib/i18n';
@@ -161,6 +163,8 @@ function App() {
   useEffect(() => {
     useSessionStore.getState().loadCustomPreviewsFromDisk();
     useProviderStore.getState().load();
+    // Initialize IM channel event listeners
+    initIMListeners();
     // Notification permission is requested lazily on first need (see useStreamProcessor.ts)
   }, []);
 
@@ -276,6 +280,7 @@ function App() {
         if (selectedSessionId) {
           useChatStore.getState().saveToCache(selectedSessionId);
           useAgentStore.getState().saveToCache(selectedSessionId);
+          useTeamStore.getState().saveToCache(selectedSessionId);
         }
 
         // Close file preview
@@ -288,6 +293,7 @@ function App() {
         const restored = useChatStore.getState().restoreFromCache(previousSessionId);
         if (restored) {
           useAgentStore.getState().restoreFromCache(previousSessionId);
+          useTeamStore.getState().restoreFromCache(previousSessionId);
           // Restore working directory
           const projectPath = prevSession.project || prevSession.projectDir;
           if (projectPath) {

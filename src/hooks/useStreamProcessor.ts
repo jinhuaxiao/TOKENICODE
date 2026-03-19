@@ -6,6 +6,8 @@ import { useAgentStore, resolveAgentId, getAgentDepth } from '../stores/agentSto
 import { bridge, onClaudeStream, onClaudeStderr } from '../lib/tauri-bridge';
 import { envFingerprint, resolveModelForProvider } from '../lib/api-provider';
 import { useProviderStore } from '../stores/providerStore';
+import { useTeamStore } from '../stores/teamStore';
+import { detectTeamSearchCommand, extractSearchQuery, extractSources, extractDomainFromUrl } from '../lib/source-parser';
 import { t } from '../lib/i18n';
 
 // --- Streaming text buffer (rAF-throttled, per-stdinId) ---
@@ -424,11 +426,30 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 }
               }
             } else {
+              // Detect team search commands in background tabs
+              const bgSearchType = block.name === 'Bash' ? detectTeamSearchCommand(block.input?.command) : null;
+              const bgTeamFields: Partial<ChatMessage> = {};
+              if (bgSearchType) {
+                bgTeamFields.teamToolType = bgSearchType;
+                const bgQuery = extractSearchQuery(block.input?.command, bgSearchType);
+                const teamState = useTeamStore.getState();
+                const bgEntry = teamState.teamCache.get(tabId);
+                const bgRoundNum = (bgEntry?.rounds.length || 0) + 1;
+                bgTeamFields.teamRound = bgRoundNum;
+                teamState.addRoundInCache(tabId, {
+                  round: bgRoundNum,
+                  query: bgQuery || '',
+                  status: 'searching',
+                  sources: [],
+                  startTime: Date.now(),
+                });
+              }
               cache.addMessageToCache(tabId, {
                 id: block.id || generateMessageId(),
                 role: 'assistant', type: 'tool_use',
                 content: '', toolName: block.name,
                 toolInput: block.input, timestamp: Date.now(),
+                ...bgTeamFields,
               });
             }
           }
@@ -474,6 +495,35 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             }
           }
           cache.updateMessageInCache(tabId, msg.tool_use_id, bgUpdates);
+
+          // Team Mode: extract sources from search results in background
+          if (parentMsg?.teamToolType && resultContent) {
+            const parsed = extractSources(resultContent, parentMsg.teamToolType);
+            const roundNum = parentMsg.teamRound || 1;
+            const teamStore = useTeamStore.getState();
+            if (parsed.length > 0) {
+              const newSources = parsed.map((s, i) => ({
+                id: `${msg.tool_use_id}_src_${i}`,
+                url: s.url,
+                title: s.title,
+                snippet: s.snippet,
+                domain: extractDomainFromUrl(s.url),
+                toolUseId: msg.tool_use_id,
+                round: roundNum,
+              }));
+              teamStore.addSourcesInCache(tabId, newSources);
+              teamStore.updateRoundInCache(tabId, roundNum, {
+                status: 'completed',
+                sources: newSources,
+                endTime: Date.now(),
+              });
+            } else {
+              teamStore.updateRoundInCache(tabId, roundNum, {
+                status: 'completed',
+                endTime: Date.now(),
+              });
+            }
+          }
         }
         break;
       }
@@ -1122,6 +1172,24 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 }
               }
             } else {
+              // Detect team search commands and tag them (works with or without Team Mode)
+              const searchType = block.name === 'Bash' ? detectTeamSearchCommand(block.input?.command) : null;
+              const teamFields: Partial<ChatMessage> = {};
+              if (searchType) {
+                teamFields.teamToolType = searchType;
+                const query = extractSearchQuery(block.input?.command, searchType);
+                const teamState = useTeamStore.getState();
+                const roundNum = teamState.rounds.length + 1;
+                teamFields.teamRound = roundNum;
+                teamState.addRound({
+                  round: roundNum,
+                  query: query || '',
+                  status: 'searching',
+                  sources: [],
+                  startTime: Date.now(),
+                });
+              }
+
               addMessage({
                 id: block.id || generateMessageId(),
                 role: 'assistant',
@@ -1131,6 +1199,7 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
                 toolInput: block.input,
                 subAgentDepth: agentDepth,
                 timestamp: Date.now(),
+                ...teamFields,
               });
 
             }
@@ -1256,6 +1325,37 @@ export function useStreamProcessor(config: StreamProcessorConfig) {
             }
 
             updateMessage(toolUseId, updates);
+
+            // Team Mode: extract sources from search results
+            if (parentMsg.teamToolType && resultContent) {
+              const parsed = extractSources(resultContent, parentMsg.teamToolType);
+              const roundNum = parentMsg.teamRound || 1;
+              if (parsed.length > 0) {
+                const newSources = parsed.map((s, i) => ({
+                  id: `${toolUseId}_src_${i}`,
+                  url: s.url,
+                  title: s.title,
+                  snippet: s.snippet,
+                  domain: extractDomainFromUrl(s.url),
+                  toolUseId,
+                  round: roundNum,
+                }));
+                useTeamStore.getState().addSources(newSources);
+                useTeamStore.getState().updateRound(roundNum, {
+                  status: 'completed',
+                  sources: newSources,
+                  endTime: Date.now(),
+                });
+                // Auto-open Sources panel
+                useSettingsStore.getState().setSecondaryTab('sources');
+              } else {
+                useTeamStore.getState().updateRound(roundNum, {
+                  status: 'completed',
+                  endTime: Date.now(),
+                });
+              }
+            }
+
             break;
           }
         }

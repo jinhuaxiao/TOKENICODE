@@ -5,7 +5,7 @@ import { persist } from 'zustand/middleware';
 
 export type Theme = 'light' | 'dark' | 'system';
 export type ColorTheme = 'black' | 'blue' | 'orange' | 'green';
-export type SecondaryPanelTab = 'files' | 'skills';
+export type SecondaryPanelTab = 'files' | 'skills' | 'sources';
 export type ModelId = 'claude-opus-4-6' | 'claude-opus-4-6-1m' | 'claude-sonnet-4-6' | 'claude-haiku-4-5-20251001';
 export type SessionMode = 'code' | 'ask' | 'plan' | 'bypass';
 /** CLI permission mode for the SDK control protocol */
@@ -70,6 +70,16 @@ interface SettingsState {
   userDisplayName: string;
   /** Whether to show dotfiles (hidden files) in the file tree */
   showHiddenFiles: boolean;
+  /** Whether Team Mode (Opus + Grok orchestration) is enabled */
+  teamModeEnabled: boolean;
+  /** Maximum search rounds in Team Mode */
+  teamMaxRounds: number;
+  /** Team Mode search backend: 'grok' uses opencli grok, 'gemini' uses Google Search Grounding */
+  teamSearchBackend: 'grok' | 'gemini';
+  /** Gemini API Key for Google Search Grounding */
+  geminiApiKey: string;
+  /** Gemini model for search (default: gemini-2.5-flash) */
+  geminiSearchModel: string;
 
   toggleTheme: () => void;
   setTheme: (theme: Theme) => void;
@@ -101,6 +111,11 @@ interface SettingsState {
   setUserAvatarUrl: (url: string) => void;
   setUserDisplayName: (name: string) => void;
   toggleHiddenFiles: () => void;
+  setTeamModeEnabled: (enabled: boolean) => void;
+  setTeamMaxRounds: (n: number) => void;
+  setTeamSearchBackend: (backend: 'grok' | 'gemini') => void;
+  setGeminiApiKey: (key: string) => void;
+  setGeminiSearchModel: (model: string) => void;
 }
 
 // --- Theme cycle order ---
@@ -141,6 +156,11 @@ export const useSettingsStore = create<SettingsState>()(
       userAvatarUrl: '',
       userDisplayName: '',
       showHiddenFiles: false,
+      teamModeEnabled: false,
+      teamMaxRounds: 5,
+      teamSearchBackend: 'grok' as 'grok' | 'gemini',
+      geminiApiKey: '',
+      geminiSearchModel: 'gemini-2.5-flash',
 
       toggleTheme: () =>
         set((state) => ({ theme: nextTheme(state.theme) })),
@@ -232,10 +252,15 @@ export const useSettingsStore = create<SettingsState>()(
         set(() => ({ userDisplayName: name.slice(0, 20) })),
       toggleHiddenFiles: () =>
         set((state) => ({ showHiddenFiles: !state.showHiddenFiles })),
+      setTeamModeEnabled: (enabled) => set({ teamModeEnabled: enabled }),
+      setTeamMaxRounds: (n) => set({ teamMaxRounds: Math.max(1, Math.min(10, n)) }),
+      setTeamSearchBackend: (backend) => set({ teamSearchBackend: backend }),
+      setGeminiApiKey: (key) => set({ geminiApiKey: key }),
+      setGeminiSearchModel: (model) => set({ geminiSearchModel: model }),
     }),
     {
       name: 'tokenicode-settings',
-      version: 6,
+      version: 8,
       migrate: (persistedState: unknown, version: number) => {
         const persisted = persistedState as Record<string, unknown>;
         if (version === 0) {
@@ -278,6 +303,15 @@ export const useSettingsStore = create<SettingsState>()(
             persisted.selectedModel = 'claude-haiku-4-5-20251001';
           }
         }
+        if (version < 7) {
+          persisted.teamModeEnabled = false;
+          persisted.teamMaxRounds = 5;
+        }
+        if (version < 8) {
+          persisted.teamSearchBackend = 'grok';
+          persisted.geminiApiKey = '';
+          persisted.geminiSearchModel = 'gemini-2.5-flash';
+        }
         return persisted;
       },
       partialize: (state) => ({
@@ -300,6 +334,11 @@ export const useSettingsStore = create<SettingsState>()(
         userAvatarUrl: state.userAvatarUrl,
         userDisplayName: state.userDisplayName,
         showHiddenFiles: state.showHiddenFiles,
+        teamModeEnabled: state.teamModeEnabled,
+        teamMaxRounds: state.teamMaxRounds,
+        teamSearchBackend: state.teamSearchBackend,
+        geminiApiKey: state.geminiApiKey,
+        geminiSearchModel: state.geminiSearchModel,
       }),
     },
   ),

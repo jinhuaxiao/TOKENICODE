@@ -11,6 +11,8 @@ import { PermissionCard } from './PermissionCard';
 import { QuestionCard } from './QuestionCard';
 import { AiAvatar } from '../shared/AiAvatar';
 import { UserAvatar } from '../shared/UserAvatar';
+import { useTeamStore } from '../../stores/teamStore';
+import { SourceCard } from '../sources/SourceCard';
 
 interface Props {
   message: ChatMessage;
@@ -150,9 +152,15 @@ function UserMsg({ message }: Props) {
       >
         {copied ? t('msg.copied') : t('msg.copyText')}
       </button>
-      <div className="max-w-[75%] px-3.5 py-2.5 rounded-2xl rounded-br-md
-        bg-bg-user-msg text-text-inverse
-        text-sm leading-relaxed shadow-md whitespace-pre-wrap">
+      <div className={`max-w-[75%] px-3.5 py-2.5 rounded-2xl rounded-br-md
+        ${message.imSource ? 'bg-indigo-600' : 'bg-bg-user-msg'} text-text-inverse
+        text-sm leading-relaxed shadow-md whitespace-pre-wrap`}>
+        {message.imSource && (
+          <div className="flex items-center gap-1.5 mb-1.5 text-[11px] text-white/70">
+            <IMChannelBadge channel={message.imSource.channel} />
+            <span>{message.imSource.sender}</span>
+          </div>
+        )}
         {renderUserContent(displayContent)}
         {!expanded && isLong && (
           <span className="text-white/60">…</span>
@@ -563,8 +571,22 @@ export const ToolUseMsg = memo(function ToolUseMsg({ message }: Props) {
   // Compute line count for Write tool
   const writeLines = toolName === 'Write' ? computeWriteLines(input) : null;
 
+  const isGrokSearch = message.teamToolType === 'grok-search' || message.teamToolType === 'gemini-search';
+
   // Build preview content based on tool type
   const renderPreview = () => {
+    // Team Mode: Grok search shows query instead of raw command
+    if (isGrokSearch && input?.command) {
+      const queryMatch = input.command.match(/["']([^"']+)["']/);
+      const query = queryMatch ? queryMatch[1] : input.command;
+      return (
+        <span className="text-[11px] text-accent/70 truncate
+          max-w-[350px] italic">
+          "{query.length > 60 ? query.slice(0, 60) + '…' : query}"
+        </span>
+      );
+    }
+
     if (toolName === 'Bash' && input?.command) {
       return (
         <span className="text-[11px] text-text-tertiary truncate
@@ -814,8 +836,20 @@ export const ToolUseMsg = memo(function ToolUseMsg({ message }: Props) {
         ) : (
           <span className="w-[10px] flex-shrink-0" />
         )}
-        <ToolIcon name={toolName} />
-        <span className="text-xs font-medium text-text-muted">{label}</span>
+        {isGrokSearch ? (
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none"
+            stroke="currentColor" strokeWidth="1.5" className="flex-shrink-0 text-accent">
+            <circle cx="7" cy="7" r="5" />
+            <path d="M14 14l-3.5-3.5" strokeLinecap="round" />
+          </svg>
+        ) : (
+          <ToolIcon name={toolName} />
+        )}
+        <span className={`text-xs font-medium ${isGrokSearch ? 'text-accent' : 'text-text-muted'}`}>
+          {isGrokSearch
+            ? (message.teamToolType === 'gemini-search' ? t('team.searchingWith.gemini') : t('team.searchingWith'))
+            : label}
+        </span>
         {renderPreview()}
         {/* Show a small result indicator when collapsed with result */}
         {!expanded && hasResult && (
@@ -825,6 +859,10 @@ export const ToolUseMsg = memo(function ToolUseMsg({ message }: Props) {
           </svg>
         )}
       </button>
+      {/* Grok search: inline source cards when result is available */}
+      {isGrokSearch && hasResult && !expanded && (
+        <GrokSourcesInline toolUseId={message.id} round={message.teamRound} />
+      )}
       {expanded && (
         <div className="ml-5 mt-0.5">
           {renderExpandedContent()}
@@ -833,6 +871,34 @@ export const ToolUseMsg = memo(function ToolUseMsg({ message }: Props) {
     </div>
   );
 });
+
+/** Inline compact source cards for Grok search results */
+function GrokSourcesInline({ toolUseId }: { toolUseId: string; round?: number }) {
+  const t = useT();
+  const sources = useTeamStore((s) => s.sources.filter((src) => src.toolUseId === toolUseId));
+
+  if (sources.length === 0) return null;
+
+  return (
+    <div className="ml-5 mt-1 mb-1">
+      <div className="flex items-center gap-1.5 overflow-x-auto pb-1
+        scrollbar-none">
+        {sources.slice(0, 5).map((source) => (
+          <SourceCard key={source.id} source={source} compact />
+        ))}
+        {sources.length > 5 && (
+          <button
+            onClick={() => useSettingsStore.getState().setSecondaryTab('sources')}
+            className="text-[10px] text-accent hover:text-accent/80
+              transition-smooth whitespace-nowrap px-1.5"
+          >
+            +{sources.length - 5} {t('team.viewAll')}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /* ================================================================
    ToolResultMsg — inline result
@@ -1060,3 +1126,19 @@ function TodoMsg({ message }: Props) {
 /* PlanReviewMsg — extracted to PlanReviewCard.tsx */
 
 /* QuestionMsg — extracted to QuestionCard.tsx */
+
+/* IM Channel Badge — shows channel icon for IM-sourced messages */
+function IMChannelBadge({ channel }: { channel: string }) {
+  const icons: Record<string, string> = {
+    telegram: 'TG',
+    discord: 'DC',
+    slack: 'SL',
+    feishu: 'FS',
+  };
+  return (
+    <span className="inline-flex items-center justify-center w-4 h-4 rounded-sm
+      bg-white/20 text-[8px] font-bold uppercase leading-none">
+      {icons[channel] || channel.slice(0, 2).toUpperCase()}
+    </span>
+  );
+}

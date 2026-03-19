@@ -3,6 +3,7 @@ import { useSettingsStore } from '../../stores/settingsStore';
 import { useChatStore } from '../../stores/chatStore';
 import { useSessionStore } from '../../stores/sessionStore';
 import { useAgentStore } from '../../stores/agentStore';
+import { useTeamStore } from '../../stores/teamStore';
 import { useT } from '../../lib/i18n';
 
 interface CommandItem {
@@ -36,8 +37,10 @@ export function CommandPalette() {
         if (currentTabId) {
           useChatStore.getState().saveToCache(currentTabId);
           useAgentStore.getState().saveToCache(currentTabId);
+          useTeamStore.getState().saveToCache(currentTabId);
         }
         useChatStore.getState().resetSession();
+        useTeamStore.getState().clearTeamState();
       },
     },
     {

@@ -1,11 +1,14 @@
 import { useSettingsStore, SecondaryPanelTab } from '../../stores/settingsStore';
 import { FileExplorer } from '../files/FileExplorer';
 import { SkillsPanel } from '../skills/SkillsPanel';
+import { SourcesPanel } from '../sources/SourcesPanel';
+import { useTeamStore } from '../../stores/teamStore';
 import { useT } from '../../lib/i18n';
 
 const tabs: { id: SecondaryPanelTab; labelKey: string; icon: string }[] = [
   { id: 'files', labelKey: 'panel.files', icon: 'M3 3h4v4H3zM9 3h4v4H9zM3 9h4v4H3z' },
   { id: 'skills', labelKey: 'panel.skills', icon: 'M8 1L1 4.5l7 3.5 7-3.5L8 1zM1 11.5l7 3.5 7-3.5M1 8l7 3.5L15 8' },
+  { id: 'sources', labelKey: 'panel.sources', icon: 'M11 11a4 4 0 100-8 4 4 0 000 8zM21 21l-4.35-4.35' },
 ];
 
 export function SecondaryPanel() {
@@ -13,6 +16,7 @@ export function SecondaryPanel() {
   const activeTab = useSettingsStore((s) => s.secondaryPanelTab);
   const setTab = useSettingsStore((s) => s.setSecondaryTab);
   const togglePanel = useSettingsStore((s) => s.toggleSecondaryPanel);
+  const sourceCount = useTeamStore((s) => s.sources.length);
 
   // Window dragging handled via CSS -webkit-app-region: drag on the top strip
 
@@ -39,6 +43,12 @@ export function SecondaryPanel() {
                 <path d={tab.icon} />
               </svg>
               {t(tab.labelKey)}
+              {tab.id === 'sources' && sourceCount > 0 && (
+                <span className="text-[9px] bg-accent/20 text-accent
+                  px-1 py-0.5 rounded-full min-w-[16px] text-center leading-none">
+                  {sourceCount}
+                </span>
+              )}
             </button>
           ))}
         </div>
@@ -56,6 +66,7 @@ export function SecondaryPanel() {
       <div className="flex-1 overflow-hidden">
         {activeTab === 'files' && <FileExplorer />}
         {activeTab === 'skills' && <SkillsPanel />}
+        {activeTab === 'sources' && <SourcesPanel />}
       </div>
     </div>
   );

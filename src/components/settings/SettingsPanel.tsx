@@ -8,8 +8,9 @@ import { GeneralTab } from './GeneralTab';
 import { ProviderTab } from './ProviderTab';
 import { CliTab } from './CliTab';
 import { McpTab } from './McpTab';
+import { IMTab } from './IMTab';
 
-type SettingsTab = 'general' | 'provider' | 'cli' | 'mcp';
+type SettingsTab = 'general' | 'provider' | 'cli' | 'mcp' | 'im';
 
 const TAB_ICONS: Record<SettingsTab, React.ReactNode> = {
   general: (
@@ -39,6 +40,12 @@ const TAB_ICONS: Record<SettingsTab, React.ReactNode> = {
       <circle cx="4" cy="11" r="0.75" fill="currentColor" />
     </svg>
   ),
+  im: (
+    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M2 3h12a1 1 0 011 1v6a1 1 0 01-1 1H6l-3 3v-3H2a1 1 0 01-1-1V4a1 1 0 011-1z" />
+      <path d="M5 7h6M5 9h3" />
+    </svg>
+  ),
 };
 
 const TAB_ITEMS: { id: SettingsTab; labelKey: string }[] = [
@@ -46,6 +53,7 @@ const TAB_ITEMS: { id: SettingsTab; labelKey: string }[] = [
   { id: 'provider', labelKey: 'settings.tab.provider' },
   { id: 'cli', labelKey: 'settings.tab.cli' },
   { id: 'mcp', labelKey: 'settings.tab.mcp' },
+  { id: 'im', labelKey: 'settings.tab.im' },
 ];
 
 export function SettingsPanel() {
@@ -118,6 +126,7 @@ export function SettingsPanel() {
             {activeTab === 'provider' && <ProviderTab />}
             {activeTab === 'cli' && <CliTab />}
             {activeTab === 'mcp' && <McpTab />}
+            {activeTab === 'im' && <IMTab />}
           </div>
         </div>
 

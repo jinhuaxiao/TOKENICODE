@@ -164,4 +164,6 @@ pub struct StartSessionParams {
     /// When not "bypassPermissions", enables --permission-prompt-tool stdio for structured
     /// permission requests via the SDK control protocol.
     pub permission_mode: Option<String>,
+    /// Additional environment variables to inject into the CLI process (e.g. GEMINI_API_KEY).
+    pub extra_env: Option<HashMap<String, String>>,
 }

@@ -231,3 +231,11 @@ src/
 | Translations | `src/lib/i18n.ts` |
 | Tauri config | `src-tauri/tauri.conf.json` |
 | Build script (macOS local) | `scripts/build-macos-local.sh` |
+
+## Process Safety Rules
+
+- **NEVER** use `killall` or `pkill` commands — they match by name pattern and can kill unrelated applications (e.g., Shadowrocket, WeChat Work)
+- **NEVER** kill processes by port number (e.g., `lsof -i :PORT | kill`) without first confirming the process name and PID with the user
+- When a port is occupied or a process is stuck, **ask the user** to handle it instead of killing processes autonomously
+- Only kill processes by **exact PID** after verifying with `ps -p <pid>` that it is the correct target process
+- When stopping dev servers, use `Ctrl+C` or the appropriate graceful shutdown method, not `kill -9`

@@ -4,6 +4,7 @@ import { useChatStore, generateMessageId } from '../../stores/chatStore';
 import { useSettingsStore } from '../../stores/settingsStore';
 import { useFileStore } from '../../stores/fileStore';
 import { useAgentStore } from '../../stores/agentStore';
+import { useTeamStore } from '../../stores/teamStore';
 import { bridge, SessionListItem } from '../../lib/tauri-bridge';
 import { listen } from '@tauri-apps/api/event';
 import { save } from '@tauri-apps/plugin-dialog';
@@ -272,6 +273,7 @@ export function ConversationList() {
     if (currentTabId) {
       useChatStore.getState().saveToCache(currentTabId);
       useAgentStore.getState().saveToCache(currentTabId);
+      useTeamStore.getState().saveToCache(currentTabId);
     }
 
     // Close file preview
@@ -284,6 +286,7 @@ export function ConversationList() {
     const restored = useChatStore.getState().restoreFromCache(sessionId);
     if (restored) {
       useAgentStore.getState().restoreFromCache(sessionId);
+      useTeamStore.getState().restoreFromCache(sessionId);
       if (projectOrDir) {
         useSettingsStore.getState().setWorkingDirectory(resolveProjectPath(projectOrDir));
       }
@@ -440,8 +443,10 @@ export function ConversationList() {
     if (currentTabId) {
       useChatStore.getState().saveToCache(currentTabId);
       useAgentStore.getState().saveToCache(currentTabId);
+      useTeamStore.getState().saveToCache(currentTabId);
     }
     useChatStore.getState().resetSession();
+    useTeamStore.getState().clearTeamState();
     const draftId = `draft_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     useSessionStore.getState().addDraftSession(draftId, realPath);
   }, []);

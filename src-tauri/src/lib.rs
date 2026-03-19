@@ -1,4 +1,5 @@
 mod commands;
+mod im;
 mod protocol;
 
 use commands::{BypassModeMap, ManagedProcess, ProcessManager, SessionInfo, StartSessionParams, StdinManager};
@@ -1295,6 +1296,7 @@ async fn start_claude_session(
     state: State<'_, ProcessManager>,
     stdin_mgr: State<'_, StdinManager>,
     bypass_modes: State<'_, BypassModeMap>,
+    im_state: State<'_, IMState>,
     params: StartSessionParams,
 ) -> Result<SessionInfo, String> {
     let session_id = params
@@ -1390,6 +1392,13 @@ async fn start_claude_session(
 
     // Append provider-specific CLI args (e.g. --setting-sources project,local)
     args.extend(provider_extra_args);
+
+    // Merge extra_env from frontend (e.g. GEMINI_API_KEY for Team Mode)
+    if let Some(ref extra) = params.extra_env {
+        for (k, v) in extra {
+            resolved_env.insert(k.clone(), v.clone());
+        }
+    }
 
     // Inject effort level env var for non-off thinking levels
     if thinking_level != "off" {
@@ -1697,8 +1706,12 @@ async fn start_claude_session(
     let stdin_clone = stdin_mgr.inner().clone();
     let is_bypass_flag = bypass_modes.register(&sid, permission_mode == "bypassPermissions").await;
     let bypass_modes_clone = bypass_modes.inner().clone();
+    // IM response forwarding: clone the dispatcher Arc for the stdout reader
+    let im_state_for_stdout = im_state.0.clone();
     tokio::spawn(async move {
         let stream_event = format!("claude:stream:{}", sid_clone);
+        // IM: accumulate assistant text for forwarding to IM channel
+        let mut im_text_buffer = String::new();
         // Use a large buffer (1MB) to efficiently read large NDJSON lines from Claude CLI.
         // Default 8KB buffer causes thousands of syscalls for large outputs (e.g. 24.8MB PDF),
         // which stalls on Windows pipes. 1MB buffer reduces syscalls by ~125x.
@@ -1868,6 +1881,66 @@ async fn start_claude_session(
                     });
                     let _ = stdin_clone.send(&sid_clone, &auto_resp.to_string()).await;
                     continue;
+                }
+            }
+
+            // IM response forwarding: accumulate text_delta, flush on message_stop.
+            // NDJSON format: {"type":"stream_event","event":{"type":"content_block_delta",...}}
+            // We need to check the nested event.type, not the top-level type.
+            {
+                let top_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let event_type = if top_type == "stream_event" {
+                    json.get("event").and_then(|e| e.get("type")).and_then(|v| v.as_str()).unwrap_or("")
+                } else {
+                    ""
+                };
+                match event_type {
+                    "content_block_delta" => {
+                        // Accumulate text_delta content from event.delta
+                        if let Some(event) = json.get("event") {
+                            if let Some(delta) = event.get("delta") {
+                                if delta.get("type").and_then(|v| v.as_str()) == Some("text_delta") {
+                                    if let Some(text) = delta.get("text").and_then(|v| v.as_str()) {
+                                        im_text_buffer.push_str(text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "message_stop" => {
+                        // Flush accumulated text to IM channel
+                        if !im_text_buffer.is_empty() {
+                            let text_to_send = std::mem::take(&mut im_text_buffer);
+                            eprintln!("[IM] Flushing {} chars on message_stop", text_to_send.len());
+                            let im_arc = im_state_for_stdout.clone();
+                            let sid_for_im = sid_clone.clone();
+                            let app_for_im = app_clone.clone();
+                            tokio::spawn(async move {
+                                let dispatcher = im_arc.read().await;
+                                if let Some(route) = dispatcher.response_router().get(&sid_for_im).await {
+                                    // Send response to IM channel (Telegram etc.)
+                                    if let Err(e) = dispatcher.send_to_channel(&route.channel_type, &route.chat_id, &text_to_send).await {
+                                        eprintln!("[IM] Failed to send response to {}:{}: {}", route.channel_type, route.chat_id, e);
+                                    } else {
+                                        eprintln!("[IM] Forwarded {} chars to {}:{}", text_to_send.len(), route.channel_type, route.chat_id);
+                                    }
+                                    // Also notify frontend to display the response in the app UI
+                                    let payload = serde_json::json!({
+                                        "channel": route.channel_type,
+                                        "chat_id": route.chat_id,
+                                        "text": text_to_send,
+                                    });
+                                    eprintln!("[IM] Emitting im:response to frontend ({} chars)", text_to_send.len());
+                                    if let Err(e) = app_for_im.emit("im:response", payload) {
+                                        eprintln!("[IM] Failed to emit im:response: {}", e);
+                                    }
+                                } else {
+                                    eprintln!("[IM] No route found for stdinId={}", sid_for_im);
+                                }
+                            });
+                        }
+                    }
+                    _ => {}
                 }
             }
 
@@ -6217,6 +6290,112 @@ async fn set_dock_icon(app: AppHandle, png_base64: String) -> Result<(), String>
     Ok(())
 }
 
+// --- IM Channel Commands ---
+
+/// Global state for the IM channel dispatcher.
+struct IMState(Arc<tokio::sync::RwLock<im::ChannelDispatcher>>);
+
+#[tauri::command]
+async fn im_start_channel(
+    app: AppHandle,
+    im_state: State<'_, IMState>,
+    channel_type: String,
+    config: serde_json::Value,
+) -> Result<(), String> {
+    let mut dispatcher = im_state.0.write().await;
+    dispatcher.start_channel(&channel_type, config, app).await
+}
+
+#[tauri::command]
+async fn im_stop_channel(
+    im_state: State<'_, IMState>,
+    channel_type: String,
+) -> Result<(), String> {
+    let mut dispatcher = im_state.0.write().await;
+    dispatcher.stop_channel(&channel_type).await
+}
+
+#[tauri::command]
+async fn im_list_channels(
+    im_state: State<'_, IMState>,
+) -> Result<Vec<im::ChannelStatus>, String> {
+    let dispatcher = im_state.0.read().await;
+    Ok(dispatcher.list_statuses().await)
+}
+
+#[tauri::command]
+async fn im_get_config() -> Result<im::IMConfig, String> {
+    im::load_im_config()
+}
+
+#[tauri::command]
+async fn im_save_config(config: im::IMConfig) -> Result<(), String> {
+    im::save_im_config(&config)
+}
+
+#[tauri::command]
+async fn im_get_sessions(
+    im_state: State<'_, IMState>,
+) -> Result<Vec<im::IMSession>, String> {
+    let dispatcher = im_state.0.read().await;
+    Ok(dispatcher.session_map().list().await)
+}
+
+#[tauri::command]
+async fn im_register_session(
+    im_state: State<'_, IMState>,
+    chat_key: String,
+    stdin_id: String,
+    channel: String,
+    chat_id: String,
+    sender: String,
+) -> Result<(), String> {
+    let dispatcher = im_state.0.read().await;
+    // Register in session map
+    dispatcher.session_map().insert(
+        chat_key.clone(),
+        im::IMSession {
+            chat_key,
+            stdin_id: stdin_id.clone(),
+            channel: channel.clone(),
+            chat_id: chat_id.clone(),
+            sender,
+            created_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        },
+    ).await;
+    // Register reverse route so stdout reader can forward responses to IM
+    dispatcher.response_router().register(&stdin_id, &channel, &chat_id).await;
+    eprintln!("[IM] Registered session: stdin_id={}, channel={}, chat_id={}", stdin_id, channel, chat_id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn im_unregister_session(
+    im_state: State<'_, IMState>,
+    chat_key: String,
+    stdin_id: String,
+) -> Result<(), String> {
+    let dispatcher = im_state.0.read().await;
+    dispatcher.session_map().remove(&chat_key).await;
+    dispatcher.response_router().unregister(&stdin_id).await;
+    eprintln!("[IM] Unregistered session: chat_key={}, stdin_id={}", chat_key, stdin_id);
+    Ok(())
+}
+
+#[tauri::command]
+async fn im_send_response(
+    im_state: State<'_, IMState>,
+    channel_type: String,
+    chat_id: String,
+    text: String,
+) -> Result<(), String> {
+    let dispatcher = im_state.0.read().await;
+    dispatcher.send_to_channel(&channel_type, &chat_id, &text).await
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -6227,6 +6406,7 @@ pub fn run() {
         .manage(StdinManager::new())
         .manage(BypassModeMap::new())
         .manage(WatcherManager::default())
+        .manage(IMState(Arc::new(tokio::sync::RwLock::new(im::ChannelDispatcher::new()))))
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
             // titleBarStyle: "Overlay" in tauri.conf.json handles macOS traffic lights
@@ -6322,6 +6502,15 @@ pub fn run() {
             test_provider_connection,
             respond_permission,
             send_control_request,
+            im_start_channel,
+            im_stop_channel,
+            im_list_channels,
+            im_get_config,
+            im_save_config,
+            im_get_sessions,
+            im_register_session,
+            im_unregister_session,
+            im_send_response,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
